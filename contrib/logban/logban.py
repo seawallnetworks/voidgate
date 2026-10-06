@@ -14,10 +14,9 @@ the profile its requests matched (default.* when none did):
     costly >= min_costly  and  costly / total >= ratio      (rule=ratio)
     backend seconds >= max_backend_seconds                   (rule=backend)
 
-A request is costly when its path matches a `costly` regex, or when its
-backend time is at least `slow_seconds`. Browsers also fetch pages and
-assets that are cheap, so their ratio stays low; a bot hammering one
-expensive endpoint scores near 1.0.
+A request is costly when its path matches a `costly` regex. Browsers
+also fetch pages and assets that are cheap, so their ratio stays low; a
+bot hammering one expensive endpoint scores near 1.0.
 
 See README.md next to this file.
 """
@@ -315,7 +314,6 @@ class Config:
     SCALARS = {
         "window": (int, 60),
         "step": (int, 10),
-        "slow_seconds": (float, 0.0),
         # A first ban is a minute: a false positive (a CGNAT address, a
         # browser near a threshold) costs one; a repeat offender doubles
         # up to max_ttl.
@@ -582,7 +580,6 @@ class Config:
                 warn("%s %d is above max_ttl %d: capped at %d"
                      % (name, ttl, self.max_ttl, self.max_ttl))
 
-        any_costly = self.costly or self.slow_seconds > 0
         fires = []
 
         default = self.profiles[0]
@@ -605,7 +602,7 @@ class Config:
                 raise ConfigError("%s.attack_scale must be in (0, 1]"
                                   % p.name)
 
-            fire = ((p.ratio is not None and any_costly)
+            fire = ((p.ratio is not None and bool(self.costly))
                     or p.max_backend_seconds > 0)
 
             # A declared profile that judges nothing is a mistake; use
@@ -618,9 +615,8 @@ class Config:
             fires.append(fire)
 
         if not any(fires) and not self.watches and not self.honey:
-            raise ConfigError("nothing is costly: set costly, slow_seconds"
-                              " or max_backend_seconds, or a watch or"
-                              " honey")
+            raise ConfigError("nothing is costly: set costly or"
+                              " max_backend_seconds, or a watch or honey")
 
 
 _time_cache = {}
@@ -1326,7 +1322,7 @@ class Judge:
                 tr = self.traffic[ip] = [0, 0, 0.0]
 
             tr[0] += 1
-            tr[1] += self.is_costly(path, cost)
+            tr[1] += self.is_costly(path)
             tr[2] += cost or 0.0
         self.clock(t)
         x = self.explain if self.explain and ip == self.explain.ip else None
@@ -1376,7 +1372,7 @@ class Judge:
                 x.listed(t, self.exempt.listed_reason(ip))
             return
 
-        costly = self.is_costly(path, cost)
+        costly = self.is_costly(path)
 
         key = (ip, self.profile_of((path, ua, ja4))
                    if len(self.cfg.profiles) > 1 else 0)
@@ -1707,10 +1703,8 @@ class Judge:
         if len(self.banned) > 65536:
             self.banned = {k: v for k, v in self.banned.items() if v > now}
 
-    def is_costly(self, path, cost):
-        return (any(p.search(path) for p in self.cfg.costly)
-                or (cost is not None and self.cfg.slow_seconds > 0
-                    and cost >= self.cfg.slow_seconds))
+    def is_costly(self, path):
+        return any(p.search(path) for p in self.cfg.costly)
 
     def count_allowed(self, ip, path, cost):
         """--top-allowed: every line from an allowlisted address, a CDN
@@ -1722,7 +1716,7 @@ class Judge:
         if not src:
             return
 
-        costly = int(self.is_costly(path, cost))
+        costly = int(self.is_costly(path))
         st = self.allowed["sources"].get(src)
 
         if st is None:

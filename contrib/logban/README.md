@@ -28,9 +28,10 @@ the backend at a packet rate voidGate's flood policy never notices. A
 browser that searches also loads pages, CSS, JS and images; a bot
 flooding `/search` loads nothing else.
 
-A request is **costly** if its path matches a `costly` regex, or its
-backend time is at least `slow_seconds`. Find them with `--top-paths`
-([Tune, then enforce](#tune-then-enforce)).
+A request is **costly** if its path matches a `costly` regex. Find the
+paths with `--top-paths` ([Tune, then enforce](#tune-then-enforce)). It
+is the path, not the response time, so a backend slowed by the attack
+does not make browsers' requests costly.
 
 | Rule | Fires when |
 |---|---|
@@ -42,7 +43,6 @@ backend time is at least `slow_seconds`. Find them with `--top-paths`
 ```
 costly = ^/search
 costly = ^/api/report
-slow_seconds = 0.5
 default.min_costly = 100         # profile "default": requests no
 default.ratio = 0.9              # other profile matched
 watch throttled = status:429     # set limit_req_status 429;

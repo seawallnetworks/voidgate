@@ -155,7 +155,7 @@ Config keys (`logban.conf` documents each one):
 | Keys | Section |
 |---|---|
 | `window`, `step` | §5.1 |
-| `costly`, `slow_seconds` | §5.2 |
+| `costly` | §5.2 |
 | `default.min_costly`, `default.ratio`, `default.max_backend_seconds` | §5.3 |
 | `profile <name>`, `<name>.min_costly`, `<name>.ratio`, `<name>.max_backend_seconds`, `<name>.attack_scale` | §5.4, §5.5, §5.9 |
 | `honey`, `honey_ttl` | §5.6 |
@@ -274,15 +274,15 @@ a fixed 60 s window would be split in two and could pass both halves.
 
 ### 5.2 Costly requests
 
-A request is costly when either:
+A request is costly when its path matches a `costly` regex
+(`^/search`, `\.php$`, ...). Run `--top-paths N` on a real log to see
+which paths cost the most backend time.
 
-- its path matches a `costly` regex (`^/search`, `\.php$`, ...), or
-- its backend time is at least `slow_seconds` (0 = off).
-
-Backend time follows the site: an endpoint that becomes slow becomes
-costly without a config change. Regexes pin the endpoints known to be
-expensive even when they answer fast. Run `--top-paths N` on a real log
-to see which paths cost the most backend time.
+A path is costly or not whatever the site's load. A test on measured
+backend time (a request is costly when it took at least N seconds) was
+dropped (§14): under load every page crosses N, so browsers' ratios rise
+just when attack mode lowers the thresholds; when quiet, a cached
+expensive endpoint answers under N and is not counted.
 
 ### 5.3 Rules
 
@@ -595,10 +595,7 @@ default.attack_scale = 0.5        # min_costly and max_backend_seconds times thi
   a threshold the site reaches on an ordinary evening makes every evening
   an attack.
 
-**Limits.** With `slow_seconds`, a slow backend makes more requests
-costly for everyone (§15), raising browsers' ratios just when the
-thresholds drop; prefer `costly` regexes on a site that uses attack
-mode. A NAT address is the first legitimate client a halved
+**Limits.** A NAT address is the first legitimate client a halved
 `max_backend_seconds` reaches (§5.3).
 
 ## 6. Exemptions
@@ -1147,8 +1144,12 @@ The offense counts are kept for every address ever banned (§15).
 - **Two passes: top addresses on the costly URL, then each one's other
   URLs.** That computes the same thing as the ratio rule in one pass.
 - **A fixed window.** Splits an attack at the boundary (§5.1).
-- **Only a hand list of costly URLs.** It goes stale as the site changes;
-  backend time does not. Both are supported.
+- **Costly by measured backend time** (`slow_seconds`, in an early
+  version). Response time follows the site's load, not the request: a
+  slow backend made every client's requests costly, browsers' included,
+  during an attack, and a fast one let a bot on a cached endpoint pass.
+  A hand list of `costly` regexes goes stale as the site changes, but
+  does not move with load; rerun `--top-paths` after a release.
 - **Checking allowlists only when a rule fires.** That was the first
   version. Bans were the same, but busy CDN edges held window state and
   flooded `-v` output (§6.1).
@@ -1220,7 +1221,8 @@ Future work:
   (Cloudflare IP Access Rules), with the Python client library from §14.
 - **More CDN providers** in `cdn_allow.py`.
 - **Typical cost per path**, learned from quiet periods, so the backend
-  rule does not tighten on everyone when the backend slows down.
+  rule does not tighten on everyone when the backend slows down, and a
+  path whose typical time is high is costly without a `costly` regex.
 - **Profiles by a hashed API key**, logged as a field and matched like
   `ja4:`, for APIs that issue keys.
 - **Persisting offense counts** across restarts, and pruning them after
@@ -1244,7 +1246,7 @@ integration scripts.
 | Test class | Covers |
 |---|---|
 | `ParseTest` | combined format, `urt` with several upstreams, `urt=-` falling back to `rt`, IPv6, timezones, garbage and malformed request lines |
-| `JudgeTest` | bot banned, browser not; IPv6; `min_costly` and `ratio` boundaries; sliding window; `slow_seconds`; rule `backend`; `skip`; `allow`; forward-confirmed crawler versus a fake; one ban per ttl; ttl doubling and `max_ttl`; `offense_memory` counted from the ban's end, so escalation holds at `max_ttl`; failed ban retried; a refusal held for its ttl, logged once, no offense, judged again after; late lines; `--top-paths` |
+| `JudgeTest` | bot banned, browser not; IPv6; `min_costly` and `ratio` boundaries; sliding window; a slow request on a cheap path not costly; rule `backend`; `skip`; `allow`; forward-confirmed crawler versus a fake; one ban per ttl; ttl doubling and `max_ttl`; `offense_memory` counted from the ban's end, so escalation holds at `max_ttl`; failed ban retried; a refusal held for its ttl, logged once, no offense, judged again after; late lines; `--top-paths` |
 | `ConfigTest` | the example `logban.conf` loads; unknown keys, bad values and a config with nothing costly are errors |
 | `AllowFileTest` | allowlisted addresses kept out of the window but in the path report, one allowlist check per address; missing or broken file at startup; reload on replace; broken update keeps the old list; counts made before the reload excused |
 | `SocketTest` | the exact `drop <ip> ttl=N` sent; `ok`; a daemon's `error:` reply is a `Refused`; no reply and no daemon are not |

@@ -166,15 +166,10 @@ class JudgeTest(unittest.TestCase):
         act, _, _ = run(config(), bot("203.0.113.7", n=200, every=3))
         self.assertEqual(act.calls, [])
 
-    def test_slow_seconds(self):
-        cfg = config(slow_seconds=1.0)
-        cfg.costly = []
-        act, _, _ = run(cfg, bot("203.0.113.7", path="/x", rt="2",
-                                 urt="1.5"))
-        self.assertEqual(len(act.calls), 1)
-
-        act, _, _ = run(cfg, bot("203.0.113.7", path="/x", rt="0.1",
-                                 urt="0.1"))
+    def test_slow_is_not_costly(self):
+        # only a costly path counts, however long the backend took
+        act, _, _ = run(config(), bot("203.0.113.7", path="/x", rt="2",
+                                      urt="1.5"))
         self.assertEqual(act.calls, [])
 
     def test_backend_rule(self):
@@ -309,7 +304,6 @@ class ConfigTest(unittest.TestCase):
         cfg = logban.Config()
         cfg.load(os.path.join(here, "logban.conf"))
         self.assertEqual(len(cfg.costly), 3)
-        self.assertEqual(cfg.slow_seconds, 0.5)
         default = cfg.profiles[0]
         self.assertEqual((default.min_costly, default.ratio,
                           default.max_backend_seconds, default.attack_scale),
@@ -318,7 +312,8 @@ class ConfigTest(unittest.TestCase):
     def test_errors(self):
         for text in ("bogus = 1\n", "window\n", "default.ratio = 2\n",
                      "costly = (\n", "allow = 300.0.0.0/8\n",
-                     "ttl = 0\ncostly = x\n", "min_costly = 5\n"):
+                     "ttl = 0\ncostly = x\n", "min_costly = 5\n",
+                     "costly = x\nslow_seconds = 0.5\n"):
             with self.assertRaises(logban.ConfigError, msg=text):
                 self.load(text)
 
@@ -2228,7 +2223,7 @@ class DataTest(unittest.TestCase):
         self.need("clickHouse.access.log")
         # one request per address: nothing to ban, clusters included
         judge, lines, _ = self.replay(
-            "costly = ^/(api|checkout|admin)/\nslow_seconds = 1.0\n"
+            "costly = ^/(api|checkout|admin)/\n"
             "watch errors = status:5..\nerrors.max = 5\n"
             "cluster_min_addresses = 10\ncluster_min_costly = 50\n",
             "clickHouse.access.log")
