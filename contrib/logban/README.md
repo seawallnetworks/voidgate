@@ -16,7 +16,9 @@ Every rule is judged per address over a 60 s sliding window, every 10 s
 (honey paths at once). A ban lasts 60 s and doubles for each repeat, up
 to `max_ttl`: 15 minutes, so a mistake (a cleaned machine, a reassigned
 address) costs little and a repeat offender is just banned again
-([design §7.1](../../doc/logban.md#71-ttl)).
+([design §7.1](../../doc/logban.md#71-ttl)). A repeat is another ban of
+the same address within `offense_memory` (a day) after its last ban
+ended; a day without one and the next ban is 60 s again.
 
 ## CC attacks
 
@@ -159,7 +161,7 @@ for another minute. logban is built so that one is rare and cheap:
   ttl instead of asking every 10 s
   ([design §7.2](../../doc/logban.md#72-after-a-ban)).
 - **A mistake costs a minute.** The first ban is 60 s, doubled only for a
-  repeat, and capped at 15 minutes.
+  repeat within `offense_memory` (a day), and capped at 15 minutes.
 - **Apps get their own limits, not a pass.** A profile gives your app's
   users thresholds that fit them; a bot forging the app's user agent or
   copying its TLS fingerprint meets the same limits
