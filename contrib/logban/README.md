@@ -71,6 +71,9 @@ profile api_other = path:^/api/       # any other stack: strict
 api_other.min_costly = 20
 ```
 
+`path:` picks requests, not clients: browsers' `/api/` calls land in
+`api_other` too. Keep it strict only if your pages do not call `/api/`.
+
 JA4 picks thresholds, never a pass: fingerprints change with OS updates
 and can be copied ([design §5.5](../../doc/logban.md#55-ja4)).
 

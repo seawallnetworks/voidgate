@@ -331,6 +331,10 @@ api.max_backend_seconds = 30     # half a worker per address
 - **Chosen per request.** The first declared profile whose `path:`,
   `ua:` or `ja4:` regex matches; `default` when none does. `default` is
   always there, set with `default.<key>` lines and no match line.
+  `ua:` and `ja4:` are the same on every request of a client, so they
+  pick a client; `path:` picks an endpoint, and splits a client across
+  profiles: a browser's `/api/v1/` calls go to `api`, its pages to
+  `default`, each with its own counters and ratio.
 - **Counted apart.** The window is keyed by (address, profile). One NAT
   address with app users and browsers keeps two counters, so the app's
   costly calls do not push the browsers' ratio over the line.
@@ -368,6 +372,12 @@ app.max_backend_seconds = 100
 profile api_other = path:^/api/       # API calls from any other stack
 api_other.min_costly = 20             # banned fast
 ```
+
+`api_other` matches by path, so it takes every other stack's `/api/`
+calls, browsers' included. Nearly all of them are costly, so on a site
+whose pages call `/api/` from the browser, a busy session can reach 20
+in a window and be banned. Use it only when `/api/` is for apps; else
+raise `api_other.min_costly` to a browser's peak (`--top-clients`).
 
 An exact `ja4:^<fingerprint>$` goes into a set, so an allowlist of
 dozens costs one lookup per line; any other `ja4:` is a regex.
