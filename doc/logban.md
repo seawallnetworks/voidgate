@@ -1233,6 +1233,14 @@ Future work:
 - **Typical cost per path**, learned from quiet periods, so the backend
   rule does not tighten on everyone when the backend slows down, and a
   path whose typical time is high is costly without a `costly` regex.
+  A request is priced by its path's median backend time, not its own,
+  so neither the site's load nor the attacker's moves it. Learning
+  stops in attack mode. Not a threshold scaled by the site's current
+  load: the attack's own load would raise it, and its requests would
+  stop counting. Open: path keys (no query string, numeric and hex
+  segments collapsed, the table capped), a path with no history
+  (measured time outside attack mode, or not costly), and warm-up after
+  a restart (regexes only, unless the table is saved).
 - **Profiles by a hashed API key**, logged as a field and matched like
   `ja4:`, for APIs that issue keys.
 - **Persisting offense counts** across restarts, and pruning them after
