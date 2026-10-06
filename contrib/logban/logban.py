@@ -1660,10 +1660,12 @@ class Judge:
         cfg = self.cfg
         count, ended = self.offenses.get(ip, (0, 0))
 
-        # Forgotten once quiet for offense_memory after the last ban
-        # ended. Counted from its start, a ban of max_ttl (a day, like
-        # offense_memory) could never be followed by a repeat in time,
-        # and the most persistent clients fell back to the first ttl.
+        # A first offense again once quiet for offense_memory after the
+        # last ban ended; the entry stays, and this ban overwrites it
+        # (pruning: doc/logban.md section 15). Counted from its start, a
+        # ban of max_ttl (a day, like offense_memory) could never be
+        # followed by a repeat in time, and the most persistent clients
+        # fell back to the first ttl.
         if now - ended > cfg.offense_memory:
             count = 0
 
