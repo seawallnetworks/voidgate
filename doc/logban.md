@@ -316,6 +316,27 @@ address carries many users' backend time, so it is the first legitimate
 client this rule hits; in the synthetic log of §11 it peaks at 146 s,
 ten times any single browser.
 
+Backend seconds are wall-clock time, not CPU. On a worker-per-request
+backend (PHP-FPM, sync gunicorn) the two agree: a waiting request holds
+its worker. On an async backend (Node, asyncio, Go) a request that waits
+holds little, so the reading as workers fails, in two ways:
+
+- **Waiting on a shared resource** (a database, a pool, a slow
+  downstream API): the time still costs, a connection or slot instead of
+  a worker. The rule still fits.
+- **Waiting on nothing** (long-poll, SSE, WebSocket, streaming): long by
+  design and almost free. One browser tab can log a whole window of
+  backend seconds. Give these paths a profile with the rule off rather
+  than `skip`, so the ratio and watches still judge them:
+
+```
+profile stream = path:^/(events|ws|poll)/
+stream.max_backend_seconds = 0
+```
+
+On a mostly async backend, the `costly` regexes measure cost better than
+time does: lean on `ratio`, and keep `max_backend_seconds` high or off.
+
 ### 5.4 Profiles
 
 Some clients cannot be judged by the ratio: an app or integration that

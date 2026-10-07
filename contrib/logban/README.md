@@ -74,6 +74,17 @@ api_other.min_costly = 20
 `path:` picks requests, not clients: browsers' `/api/` calls land in
 `api_other` too. Keep it strict only if your pages do not call `/api/`.
 
+**Backend seconds are wall-clock time**, not CPU. On an async backend
+(Node, asyncio, Go), a long-poll, SSE or WebSocket request is long and
+almost free, and one browser tab can reach `max_backend_seconds`. Turn
+the rule off for those paths in a profile; the ratio still judges them
+([design §5.3](../../doc/logban.md#53-rules)):
+
+```
+profile stream = path:^/(events|ws|poll)/
+stream.max_backend_seconds = 0
+```
+
 JA4 picks thresholds, never a pass: fingerprints change with OS updates
 and can be copied ([design §5.5](../../doc/logban.md#55-ja4)).
 
