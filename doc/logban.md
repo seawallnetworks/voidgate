@@ -377,6 +377,21 @@ api.max_backend_seconds = 30     # half a worker per address
   user agent at 379 s: `api.max_backend_seconds = 30` banned the NAT too,
   100 would separate them. Read `--top-clients` before choosing.
 
+**Counting instead of timing.** Backend seconds are wall time (§5.3): on
+an async backend they say little about cost. A ratio near 0 turns the
+ratio rule into a count of costly calls per address, which time does not
+skew:
+
+```
+profile api = path:^/api/
+api.ratio = 0.01                 # the share no longer decides
+api.min_costly = 300             # 300 costly calls per window
+```
+
+`ratio` must be above 0, so 0.01 stands for "any share". Attack mode
+scales `min_costly` as usual. To cap all API calls, costly or not, add
+a watch (§5.7): `watch apiflood = path:^/api/`, `apiflood.max = 600`.
+
 ### 5.5 JA4
 
 JA4 fingerprints the TLS ClientHello: version, cipher suites,

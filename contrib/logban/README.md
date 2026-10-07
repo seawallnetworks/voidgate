@@ -59,6 +59,15 @@ api.ratio = off
 api.max_backend_seconds = 30     # half a backend worker per address
 ```
 
+On an async backend, where backend seconds say little, count instead: a
+ratio near 0 makes `min_costly` a per-address limit on costly calls
+([design §5.4](../../doc/logban.md#54-profiles)):
+
+```
+api.ratio = 0.01                 # the share no longer decides
+api.min_costly = 300             # 300 costly calls per window
+```
+
 A forged user agent gets the same limits, not a pass. With a JA4 module,
 log `ja4=$http_ssl_ja4` and match your app's TLS stacks instead, which a
 script cannot fake with one header:
