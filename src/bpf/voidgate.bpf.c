@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* voidgate data plane.
  *
- * IDLE  (cfg.armed == 0): bump rx counters, PASS. No parse, no LPM, no LRU.
- * ACTIVE (cfg.armed == 1): whitelist → drop LPM → count → PASS|DROP.
+ * IDLE (cfg.armed == 0, or no cfg):
+ *   every frame                                 → count rx and passed, PASS
+ *   nothing is parsed or looked up.
+ *
+ * ACTIVE (cfg.armed == 1), first match wins:
+ *   1. whitelist                                → count, PASS
+ *   2. reply to a flow the host opened, found
+ *      in sw_flowd's table (Seawall 0007)       → PASS, source not counted
+ *   3. source or destination in drop LPM        → DROP
+ *   4. anything else                            → count, PASS
  *
  * Control plane decides prefixes; this program only enforces them.
  *
@@ -16,6 +24,7 @@
 #include <bpf/bpf_endian.h>
 #include <xdp/xdp_helpers.h>
 #include "voidgate.h"
+#include <sw_flowd/sw_flowd.h>
 
 /* vg_judge()'s verdict; each entry turns it into its hook's. */
 #define VG_PASS  0
@@ -26,6 +35,8 @@
  * headers, TCP. The TC entry pulls this much into the skb's linear part.
  */
 #define VG_HDR_MAX  256
+
+#define VG_TCP_ACK  0x10
 
 
 static __always_inline struct vg_metrics *get_metrics(void);
@@ -46,7 +57,10 @@ static __always_inline int v4_tcp_allowed(const struct vg_cfg *c,
 static __always_inline int v6_tcp_allowed(const struct vg_cfg *c,
     const __u8 saddr[16], const __u8 daddr[16], __u16 sport, __u16 dport);
 static __always_inline int parse_l4(void *l4, void *data_end, __u8 proto,
-    __u16 *sport, __u16 *dport, __u8 *icmp6_type);
+    __u16 *sport, __u16 *dport, __u8 *tcp_flags, __u8 *icmp6_type);
+static __always_inline int is_reply(const struct vg_cfg *c,
+    __u8 family, __u8 proto, const void *saddr, __u16 sport, __u16 dport,
+    __u8 tcp_flags);
 static __always_inline int v6_walk_ext(void *data_end, void **l4p,
     __u8 *protop);
 static __always_inline int pass(struct vg_metrics *m, __u64 pkts);
@@ -164,6 +178,27 @@ struct {
     __type(key, struct vg_ip6);
     __type(value, struct host_counters);
 } remote_v6 SEC(".maps");
+
+
+/* sw_flowd's flow table and its config (Seawall proposal 0009): userspace
+ * binds their pinned maps here before the load (bpf_map__reuse_fd), with
+ * the table's size sw_flowd's. Without them, these are voidgate's own and
+ * stay empty: no flow, as before sw_flowd.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 1);
+    __type(key, struct sf_flow_key);
+    __type(value, struct sf_flow);
+} flows SEC(".maps");
+
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct sf_config);
+} flows_config SEC(".maps");
 
 
 static __always_inline struct vg_metrics *
@@ -351,11 +386,12 @@ v6_tcp_allowed(const struct vg_cfg *c,
 
 static __always_inline int
 parse_l4(void *l4, void *data_end, __u8 proto,
-    __u16 *sport, __u16 *dport,
+    __u16 *sport, __u16 *dport, __u8 *tcp_flags,
     __u8 *icmp6_type)
 {
     *sport = 0;
     *dport = 0;
+    *tcp_flags = 0;
 
     if (icmp6_type != NULL) {
         *icmp6_type = 0;
@@ -370,6 +406,7 @@ parse_l4(void *l4, void *data_end, __u8 proto,
 
         *sport = bpf_ntohs(th->source);
         *dport = bpf_ntohs(th->dest);
+        *tcp_flags = th->flags;
         return 0;
     }
 
@@ -463,6 +500,42 @@ v6_walk_ext(void *data_end, void **l4p, __u8 *protop)
 }
 
 
+/* Is this packet to a local address a reply to a flow the host opened:
+ * one sw_flowd recorded leaving within reply_idle_ns? Only what can
+ * be a reply is looked up: TCP with ACK (a reply is a SYN-ACK or later),
+ * UDP to a port in the ephemeral range sw_flowd records UDP from. Other
+ * protocols are never recorded, so their lookup misses.
+ */
+static __always_inline int
+is_reply(const struct vg_cfg *c, __u8 family, __u8 proto,
+    const void *saddr, __u16 sport, __u16 dport, __u8 tcp_flags)
+{
+    struct sf_config *fc;
+    __u64 seen;
+    __u32 zero = 0;
+
+    if (proto == VG_IPPROTO_TCP && !(tcp_flags & VG_TCP_ACK)) {
+        return 0;
+    }
+
+    if (proto == VG_IPPROTO_UDP) {
+        fc = bpf_map_lookup_elem(&flows_config, &zero);
+
+        if (fc == NULL || dport < fc->port_lo || dport > fc->port_hi) {
+            return 0;
+        }
+    }
+
+    seen = sf_flow_seen(&flows, family, proto, saddr, sport, dport);
+
+    if (seen == 0) {
+        return 0;
+    }
+
+    return bpf_ktime_get_coarse_ns() - seen < c->reply_idle_ns;
+}
+
+
 static __always_inline int
 pass(struct vg_metrics *m, __u64 pkts)
 {
@@ -528,9 +601,9 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         __u32 ihl;
         void *l4;
         __be32 saddr, daddr;
-        __u8 proto;
+        __u8 proto, tcp_flags = 0;
         __u16 sport = 0, dport = 0;
-        int first_frag;
+        int first_frag, local = -1;
 
         if ((void *) (ip + 1) > data_end) {
             return parse_fail(m);
@@ -554,7 +627,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             }
 
         } else if (first_frag
-                   && parse_l4(l4, data_end, proto, &sport, &dport, NULL) < 0)
+                   && parse_l4(l4, data_end, proto, &sport, &dport,
+                               &tcp_flags, NULL) < 0)
         {
             if (m != NULL) {
                 m->parse_err++;
@@ -577,6 +651,21 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v4_count;
         }
 
+        local = v4_in_lpm(&local_v4, daddr);
+
+        /* not counted against its source, which it would get banned */
+        if (local && is_reply(c, SF_FAMILY_V4, proto, &saddr, sport,
+                                    dport, tcp_flags))
+        {
+            acc_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
+
+            if (m != NULL) {
+                m->reply_passed += pkts;
+            }
+
+            return pass(m, pkts);
+        }
+
         if (v4_in_lpm(&drop_v4, saddr) || v4_in_lpm(&drop_v4, daddr)) {
             if (m != NULL) {
                 m->dropped += pkts;
@@ -588,7 +677,11 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         v4_count:
 
-        if (v4_in_lpm(&local_v4, daddr)) {
+        if (local < 0) {
+            local = v4_in_lpm(&local_v4, daddr);
+        }
+
+        if (local) {
             acc_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
             acc_in(VG_HASH_GET(remote_v4, &saddr, m), pkts, pkt_len);
         }
@@ -599,9 +692,10 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
     if (eth_proto == VG_ETH_P_IPV6) {
         struct vg_ipv6hdr *ip6 = nh;
         void *l4;
-        __u8 proto;
+        __u8 proto, tcp_flags = 0;
         __u16 sport = 0, dport = 0;
         __u8 icmp6_type = 0;
+        int local = -1;
         struct vg_ip6 saddr = {}, daddr = {};
 
         if ((void *) (ip6 + 1) > data_end) {
@@ -623,7 +717,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
             } else if (ext_rc > 0
                     && parse_l4(l4, data_end, proto, &sport, &dport,
-                                &icmp6_type) < 0)
+                                &tcp_flags, &icmp6_type) < 0)
             {
                 if (m != NULL) {
                     m->parse_err++;
@@ -664,6 +758,20 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v6_count;
         }
 
+        local = v6_in_lpm(&local_v6, daddr.addr);
+
+        if (local && is_reply(c, SF_FAMILY_V6, proto, saddr.addr,
+                                    sport, dport, tcp_flags))
+        {
+            acc_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
+
+            if (m != NULL) {
+                m->reply_passed += pkts;
+            }
+
+            return pass(m, pkts);
+        }
+
         if (v6_in_lpm(&drop_v6, saddr.addr)
             || v6_in_lpm(&drop_v6, daddr.addr))
         {
@@ -677,7 +785,11 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         v6_count:
 
-        if (v6_in_lpm(&local_v6, daddr.addr)) {
+        if (local < 0) {
+            local = v6_in_lpm(&local_v6, daddr.addr);
+        }
+
+        if (local) {
             acc_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
             acc_in(VG_HASH_GET(remote_v6, &saddr, m), pkts, pkt_len);
         }

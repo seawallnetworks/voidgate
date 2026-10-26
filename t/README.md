@@ -95,6 +95,7 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | `integration/daemon.sh` | daemon startup, detach, logging, pid file |
 | `integration/resty.sh` | OpenResty client in real nginx (`resty.lua` methods, `ban()`, `-g`); skips without nginx + lua module |
 | `integration/netns.sh` | veth flood: IDLE → ACTIVE wake and drop (`VG_HOOK=tc`: at TC) |
+| `integration/reply.sh` | with sw_flowd: its table bound when voidgate starts after it (not before), kept across a restart of sw_flowd; a download survives an armed gate, a flood from its server is dropped, manual drops win; a table of another layout is refused (`VG_HOOK=tc`: at TC); skips without sw_flowd (`SW_FLOWD`, or `../sw_flowd/sw_flowd`) |
 | `integration/coexist.sh` | sharing the XDP hook: libxdp's dispatcher, TC when another program holds it, leftovers of a killed daemon; skips without clang + xdp-tools |
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
 
@@ -106,6 +107,7 @@ scripts run separately, each with sudo:
 sudo t/integration/daemon.sh
 sudo t/integration/resty.sh
 sudo t/integration/netns.sh
+sudo t/integration/reply.sh
 sudo t/integration/coexist.sh
 ```
 

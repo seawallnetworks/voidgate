@@ -63,6 +63,8 @@ struct vg_metrics {
     __u64  map_full;   /* host/remote hash insert failed */
     __u64  parse_err;  /* bad header; still judged by the drop LPM when
                           both addresses are readable, else passed */
+    __u64  reply_passed;  /* armed, a reply to a flow the host opened:
+                             passed, not counted against its source */
 };
 
 
@@ -70,6 +72,7 @@ struct vg_cfg {
     __u32  armed;
     __u16  allow_ports[VG_MAX_ALLOW_PORTS];
     __u16  allow_port_count;
+    __u64  reply_idle_ns;  /* a flow idle longer is not looked up */
 };
 
 

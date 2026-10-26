@@ -62,6 +62,7 @@ static const struct cfg_scalar scalars[] = {
     { "metrics_port", CFG_I32, CFG_OFF(metrics_port), 0 },
     { "remote_map_size", CFG_U32, CFG_OFF(remote_map_size), 0 },
     { "drop_map_size", CFG_U32, CFG_OFF(drop_map_size), 0 },
+    { "reply_idle_seconds", CFG_I32, CFG_OFF(reply_idle_seconds), 0 },
 };
 
 
@@ -85,6 +86,7 @@ vg_config_defaults(struct vg_config *c)
     c->metrics_port = 9105;
     c->remote_map_size = 262144;
     c->drop_map_size = 65536;
+    c->reply_idle_seconds = 120;
     c->allow_ports[0] = 22;
     c->allow_port_count = 1;
     c->auto_local = 1;
@@ -382,6 +384,10 @@ vg_config_load(const char *path, struct vg_config *c)
 
     if (c->idle_poll_ms <= 0) {
         c->idle_poll_ms = 1000;
+    }
+
+    if (c->reply_idle_seconds <= 0) {
+        c->reply_idle_seconds = 120;
     }
 
     return 0;

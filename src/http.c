@@ -18,7 +18,10 @@ static void
 format_prometheus(struct vg_ctrl *c, const struct vg_metrics *m, char *buf,
     size_t buflen)
 {
-    snprintf(buf, buflen,
+    int n;
+    uint64_t entries, evicted;
+
+    n = snprintf(buf, buflen,
              "# TYPE voidgate_armed gauge\n"
              "voidgate_armed %d\n"
              "# TYPE voidgate_rx_packets_total counter\n"
@@ -41,6 +44,35 @@ format_prometheus(struct vg_ctrl *c, const struct vg_metrics *m, char *buf,
              (unsigned long long) m->dropped,
              (unsigned long long) m->map_full, c->drop_count, c->rx_pps,
              c->maps->degraded);
+
+    if (n < 0 || (size_t) n >= buflen) {
+        return;
+    }
+
+    /* sw_flowd's table: replies passed by it, and its own counters */
+    n += snprintf(buf + n, buflen - (size_t) n,
+                  "# TYPE voidgate_reply_passed_packets_total counter\n"
+                  "voidgate_reply_passed_packets_total %llu\n"
+                  "# TYPE voidgate_flow_table_attached gauge\n"
+                  "voidgate_flow_table_attached %d\n",
+                  (unsigned long long) m->reply_passed,
+                  c->maps->flows_fd >= 0 ? 1 : 0);
+
+    if (n < 0 || (size_t) n >= buflen
+        || vg_flows_stats(c->maps, &entries, &evicted) != 0)
+    {
+        return;
+    }
+
+    snprintf(buf + n, buflen - (size_t) n,
+             "# TYPE voidgate_flow_table_size gauge\n"
+             "voidgate_flow_table_size %u\n"
+             "# TYPE voidgate_flow_table_entries gauge\n"
+             "voidgate_flow_table_entries %llu\n"
+             "# TYPE voidgate_flow_table_evicted_total counter\n"
+             "voidgate_flow_table_evicted_total %llu\n",
+             c->maps->flows_size, (unsigned long long) entries,
+             (unsigned long long) evicted);
 }
 
 

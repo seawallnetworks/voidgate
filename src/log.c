@@ -74,5 +74,7 @@ vg_log_config_at(const char *file, int line,
     fprintf(stderr, "  ├─ remote_map_size = %u\n",
             cfg->remote_map_size);
     fprintf(stderr, "  ├─ drop_map_size = %u\n", cfg->drop_map_size);
+    fprintf(stderr, "  ├─ reply_idle_seconds = %d\n",
+            cfg->reply_idle_seconds);
     fprintf(stderr, "  └─ metrics_port = %d\n", cfg->metrics_port);
 }

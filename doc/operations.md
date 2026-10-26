@@ -27,7 +27,20 @@ gate, counts sources and installs CIDRs into an LPM drop tree.
 | State | Data plane does | Leaves when |
 | --- | --- | --- |
 | IDLE (`armed=0`) | Counts `rx_pkts` / `rx_bytes`, passes everything | rx exceeds `wake_pps` or `wake_mbps` |
-| ACTIVE (`armed=1`) | Parses IPv4/IPv6, drops prefixes in `drop_v4` / `drop_v6`, counts sources | rx below both wake thresholds for `clear_seconds` and the drop tree is empty |
+| ACTIVE (`armed=1`) | Parses IPv4/IPv6, drops prefixes in the drop trees, passes replies to the host's own flows, counts sources | rx below both wake thresholds for `clear_seconds` and the drop tree is empty |
+
+An armed gate passes replies to flows the host opened itself (a download,
+an update, a DNS query) and never counts them against their source, so a
+fast download cannot get its server banned. It reads them from
+[sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table, which
+records the host's outbound flows at TC egress (Seawall proposals 0007
+and 0009). voidgate binds that table when it starts, so sw_flowd starts
+first (the unit is `After=` and `Wants=sw_flowd.service`). Started
+without it, voidgate judges those replies as any other until it is
+restarted; restarting sw_flowd needs no restart of voidgate, `sw_flowd
+-P` does.
+No drop stops such a flow, a manual one included: a drop keeps out
+traffic the host did not ask for, not the replies it did.
 
 Components:
 
@@ -38,6 +51,7 @@ Components:
 | `voidgate-mkconf` | `/usr/local/seawall/libexec/voidgate-mkconf` | Writes the first config from the default, with the default-route interface |
 | `voidgate.service` | `/etc/systemd/system/voidgate.service` | systemd unit, foreground, `-g voidgate` |
 | `resty.voidgate` | `/usr/local/seawall/openresty/site/lualib/resty/voidgate.lua` | OpenResty client that pushes L7 bans down to XDP |
+| `sw_flowd` | separate component, its own unit | Records the host's outbound flows; voidgate reads its table under `/sys/fs/bpf/seawall/flows` |
 
 voidgate shares the XDP hook through libxdp's dispatcher at priority 10,
 ahead of mini-fw and other libxdp programs. If a non-dispatcher program
@@ -47,7 +61,11 @@ itself degraded.
 ## 2. Building and installing
 
 Install the seawall repo first: `make install` refuses to run without the
-group `voidgate`, which seawall creates.
+group `voidgate`, which seawall creates. The build needs sw_flowd's
+header, `<sw_flowd/sw_flowd.h>`, the layout of the flow table voidgate
+reads: sw_flowd's `sudo make install-header` (or its `make install`)
+puts it under `/usr/local/seawall/include`; `make SW_FLOWD_PREFIX=DIR`
+looks in `DIR/include` instead.
 
 Host requirements:
 
@@ -132,6 +150,7 @@ its comments.
 | `allow_ports` | `22` | TCP ports passed on the local side. CSV, at most 8. | reload |
 | `remote_map_size` | `262144` | Cap on tracked sources (LRU, not preallocated). | restart |
 | `drop_map_size` | `65536` | Cap on drop-tree prefixes (not preallocated). | restart |
+| `reply_idle_seconds` | `120` | A flow that has not left for longer is not looked up. | reload |
 | `metrics_port` | `9105` | Prometheus on `127.0.0.1`; `0` disables it. | restart |
 
 The built-in allow list is
@@ -223,7 +242,7 @@ scripts.
 | Command | Effect | Typical answer |
 | --- | --- | --- |
 | `status` | State summary | `state=IDLE armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0` |
-| `stats` | Data-plane counters and rates | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=…` |
+| `stats` | Data-plane counters and rates; `flows` is `sw_flowd` while its table is read, `none` without it | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
 | `drops` | Installed prefixes with reason and age | one line per prefix, or `(none)` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
 | `disarm` | Flush the drop tree, back to IDLE | `ok` |
@@ -259,6 +278,10 @@ Prometheus, when `metrics_port` is positive, is
 | `voidgate_dropped_packets_total` | counter | rate > 0 means an attack is being cut |
 | `voidgate_drop_prefixes` | gauge | near `drop_map_size` |
 | `voidgate_map_full_total` | counter | any increase: the drop tree or source map is full |
+| `voidgate_reply_passed_packets_total` | counter | trend: replies to the host's own flows an armed gate passed |
+| `voidgate_flow_table_attached` | gauge | 0: sw_flowd wasn't running when voidgate started |
+| `voidgate_flow_table_entries`, `voidgate_flow_table_size` | gauge | entries near size: raise sw_flowd's `table_size` |
+| `voidgate_flow_table_evicted_total` | counter | sustained increase: the table is too small |
 
 The listener binds only `127.0.0.1`; scrape it with a local agent or node
 exporter textfile, not across the network.
@@ -409,6 +432,7 @@ there.
 | `error: reload failed` | Bad value in the config | Fix the line the log names; the old config keeps running |
 | Gate stays armed after the flood | A drop is still installed (manual drops never expire) | `voidgatectl drops`; `undrop` or `disarm` |
 | Legitimate clients dropped | Shared NAT or proxy over threshold, or aggregation | `undrop`, add the range to `allow_networks`, `reload`; raise `aggregate_k` |
+| A download's or update's server dropped | sw_flowd wasn't running when voidgate started (`stats` shows `flows=none`) | Start sw_flowd, then restart voidgate: it binds the table when it starts |
 | SSH lost during an attack | Port not in `allow_ports`, or SSH on a non-local address | Keep `22` (or your SSH port) in `allow_ports`; check `local_networks` |
 | `map_full` climbing | Too many sources for `remote_map_size` or `drop_map_size` | Lower `aggregate_k` so `/24` and `/64` drops relieve the tree; raise sizes and restart |
 | `ban()` from nginx does nothing | Worker user not in `voidgate`, or address in an allow list | Check the nginx error log for the daemon's answer |

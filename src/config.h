@@ -30,6 +30,7 @@ struct vg_config {
     int               metrics_port;
     uint32_t          remote_map_size;
     uint32_t          drop_map_size;
+    int               reply_idle_seconds;
     uint16_t          allow_ports[VG_MAX_ALLOW_PORTS];
     int               allow_port_count;
     struct vg_cidr    local_cidr[VG_MAX_CIDR_LIST];

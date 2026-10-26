@@ -92,16 +92,21 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
 
     snprintf(reply, reply_size,
              "rx_pkts=%llu rx_bytes=%llu passed=%llu dropped=%llu "
-             "non_ip=%llu map_full=%llu parse_err=%llu\n"
-             "rx_pps=%.0f rx_bps=%.0f state=%s prefixes=%d\n",
+             "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu\n"
+             "rx_pps=%.0f rx_bps=%.0f state=%s prefixes=%d flows=%s\n",
              (unsigned long long) m.rx_pkts,
              (unsigned long long) m.rx_bytes,
              (unsigned long long) m.passed,
              (unsigned long long) m.dropped,
              (unsigned long long) m.non_ip,
              (unsigned long long) m.map_full,
-             (unsigned long long) m.parse_err, ctrl->rx_pps, ctrl->rx_bps,
-             ctrl->state == VG_ACTIVE ? "active" : "idle", ctrl->drop_count);
+             (unsigned long long) m.parse_err,
+             (unsigned long long) m.reply_passed,
+             ctrl->rx_pps,
+             ctrl->rx_bps,
+             ctrl->state == VG_ACTIVE ? "active" : "idle",
+             ctrl->drop_count,
+             ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
 }
 
 

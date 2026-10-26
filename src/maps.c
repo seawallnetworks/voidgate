@@ -20,6 +20,8 @@
 #include <sys/vfs.h>
 #include <unistd.h>
 
+#include <sw_flowd/sw_flowd.h>
+
 /* tcx is Linux 6.6's UAPI: with older headers, such as Amazon Linux
  * 2023's 6.1, voidgate still attaches with tcx on a kernel that has it.
  */
@@ -68,6 +70,7 @@ static int foreach_family(struct vg_maps *m, int fd, int family, size_t ksz,
 static int lpm_update(int fd, const struct vg_cidr *p, const void *val);
 static int lpm_delete(int fd, const struct vg_cidr *p);
 static int flush_lpm(int fd, int v6);
+static void flows_open(struct vg_maps *m);
 
 static void
 bump_memlock(void)
@@ -120,6 +123,11 @@ sum_scratch_need(int ncpus)
 {
     size_t a = sizeof(struct host_counters);
     size_t b = sizeof(struct vg_metrics);
+    size_t c = sizeof(struct sf_stats);
+
+    if (c > b) {
+        b = c;
+    }
 
     return (size_t) ncpus * (a > b ? a : b);
 }
@@ -133,6 +141,9 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
 
     m->ifindex = (int) if_nametoindex(cfg->interface);
     m->tcx_fd = -1;
+    m->flows_fd = -1;
+    m->flows_config_fd = -1;
+    m->flows_stats_fd = -1;
 
     bump_memlock();
     libbpf_set_print(libbpf_print);
@@ -151,6 +162,8 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     if (m->sum_scratch == NULL) {
         vg_die("out of memory");
     }
+
+    flows_open(m);
 
     if (skel_open(m, cfg) < 0) {
         free(m->sum_scratch);
@@ -179,6 +192,18 @@ skel_open(struct vg_maps *m, const struct vg_config *cfg)
     if (cfg->drop_map_size) {
         bpf_map__set_max_entries(m->skel->maps.drop_v4, cfg->drop_map_size);
         bpf_map__set_max_entries(m->skel->maps.drop_v6, cfg->drop_map_size);
+    }
+
+    /* sw_flowd's table, as flows_open() found it */
+    if (m->flows_fd >= 0
+        && (bpf_map__reuse_fd(m->skel->maps.flows, m->flows_fd) != 0
+            || bpf_map__reuse_fd(m->skel->maps.flows_config,
+                                 m->flows_config_fd) != 0))
+    {
+        vg_warn("sw_flowd's flow table: %s", strerror(errno));
+        voidgate_bpf__destroy(m->skel);
+        m->skel = NULL;
+        return -1;
     }
 
     return 0;
@@ -217,6 +242,18 @@ vg_maps_close(struct vg_maps *m)
     }
 
     vg_detach(m);
+
+    if (m->flows_fd >= 0) {
+        close(m->flows_fd);
+        close(m->flows_config_fd);
+        m->flows_fd = -1;
+        m->flows_config_fd = -1;
+    }
+
+    if (m->flows_stats_fd >= 0) {
+        close(m->flows_stats_fd);
+        m->flows_stats_fd = -1;
+    }
 
     if (m->skel != NULL) {
         voidgate_bpf__destroy(m->skel);
@@ -750,6 +787,9 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
         for (i = 0; i < bc.allow_port_count; i++) {
             bc.allow_ports[i] = cfg->allow_ports[i];
         }
+
+        bc.reply_idle_ns = (uint64_t) cfg->reply_idle_seconds
+                              * 1000000000ULL;
     }
 
     fd = bpf_map__fd(m->skel->maps.cfg);
@@ -905,6 +945,102 @@ vg_drop_flush(struct vg_maps *m)
 {
     flush_lpm(bpf_map__fd(m->skel->maps.drop_v4), 0);
     flush_lpm(bpf_map__fd(m->skel->maps.drop_v6), 1);
+
+    return 0;
+}
+
+
+/*
+ * sw_flowd's table and config (Seawall proposals 0007, 0009), for every
+ * object voidgate loads to bind: sw_flowd starts first. The table is not
+ * versioned: maps of another layout are a sw_flowd built from another
+ * sw_flowd.h than voidgate was, and are not bound. Without them, replies
+ * to the host's flows are judged as any other until voidgate restarts.
+ */
+static void
+flows_open(struct vg_maps *m)
+{
+    int tfd, cfd;
+    __u32 len;
+    struct bpf_map_info info, cinfo;
+
+    tfd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_OUTBOUND);
+    cfd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_CONFIG);
+
+    if (tfd < 0 || cfd < 0) {
+        vg_warn("no sw_flowd flow table under %s: replies to the host's "
+                "own flows are judged as any other until voidgate restarts "
+                "with it (start sw_flowd first)", SF_PIN_ROOT);
+        goto none;
+    }
+
+    memset(&info, 0, sizeof(info));
+    len = sizeof(info);
+
+    if (bpf_map_get_info_by_fd(tfd, &info, &len) != 0) {
+        goto refused;
+    }
+
+    memset(&cinfo, 0, sizeof(cinfo));
+    len = sizeof(cinfo);
+
+    if (bpf_map_get_info_by_fd(cfd, &cinfo, &len) != 0
+        || info.type != BPF_MAP_TYPE_LRU_HASH
+        || info.key_size != sizeof(struct sf_flow_key)
+        || info.value_size != sizeof(struct sf_flow)
+        || cinfo.type != BPF_MAP_TYPE_ARRAY
+        || cinfo.key_size != sizeof(__u32)
+        || cinfo.value_size != sizeof(struct sf_config))
+    {
+        goto refused;
+    }
+
+    m->flows_fd = tfd;
+    m->flows_config_fd = cfd;
+    m->flows_size = info.max_entries;
+    m->flows_stats_fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_STATS);
+    vg_log("reading sw_flowd's flow table (%u flows): replies to the "
+           "host's own flows pass an armed gate", info.max_entries);
+
+    return;
+
+refused:
+
+    vg_warn("sw_flowd's flow table under %s is not the layout this "
+            "voidgate reads: not reading it", SF_PIN_ROOT);
+
+none:
+
+    if (tfd >= 0) {
+        close(tfd);
+    }
+
+    if (cfd >= 0) {
+        close(cfd);
+    }
+}
+
+
+/* sw_flowd's counters, summed: 0, or -1 while its table is not in. */
+int
+vg_flows_stats(struct vg_maps *m, uint64_t *entries, uint64_t *evicted)
+{
+    __u32 key;
+    struct sf_stats s;
+
+    *entries = 0;
+    *evicted = 0;
+
+    if (m->flows_fd < 0 || m->flows_stats_fd < 0) {
+        return -1;
+    }
+
+    for (key = SF_STATS_BPF; key <= SF_STATS_DAEMON; key++) {
+        if (vg_sum_percpu(m, m->flows_stats_fd, &key, sizeof(s), &s) == 0) {
+            *entries += s.entries;
+            *evicted += s.evicted;
+        }
+    }
 
     return 0;
 }

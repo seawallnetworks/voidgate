@@ -4,6 +4,7 @@
 if [[ ${1:-} != --isolated ]]; then
     # sudo resets the environment: keep what picks the hook
     exec sudo env ${VG_HOOK:+VG_HOOK=$VG_HOOK} ${VG_NO_TCX:+VG_NO_TCX=1} \
+        ${SW_FLOWD:+SW_FLOWD=$SW_FLOWD} \
         unshare --mount-proc --net --pid --fork --kill-child \
         --propagation private bash "$0" --isolated \
         "$(readlink /proc/self/ns/mnt)" "$@"

@@ -31,6 +31,10 @@ struct vg_maps {
     int                   tcx_fd;       /* -1: classic TC */
     void                 *sum_scratch;
     size_t                sum_scratch_size;
+    int                   flows_fd;     /* sw_flowd's table; -1: none */
+    int                   flows_config_fd;
+    uint32_t              flows_size;
+    int                   flows_stats_fd;
 };
 
 
@@ -61,6 +65,8 @@ int vg_drop_add(struct vg_maps *m, const struct vg_cidr *p, uint32_t reason,
     uint32_t now);
 int vg_drop_del(struct vg_maps *m, const struct vg_cidr *p);
 int vg_drop_flush(struct vg_maps *m);
+
+int vg_flows_stats(struct vg_maps *m, uint64_t *entries, uint64_t *evicted);
 
 int vg_populate_local(struct vg_maps *m, const struct vg_config *cfg);
 int vg_populate_allow(struct vg_maps *m, const struct vg_config *cfg);

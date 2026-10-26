@@ -1,7 +1,9 @@
 [Unit]
 Description=voidgate XDP DDoS gate
-After=network-online.target
-Wants=network-online.target
+# sw_flowd's flow table, which voidgate binds when it starts (Seawall
+# proposal 0009); without sw_flowd installed, Wants= does nothing
+After=network-online.target sw_flowd.service
+Wants=network-online.target sw_flowd.service
 
 [Service]
 Type=simple

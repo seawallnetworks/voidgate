@@ -27,6 +27,10 @@ IDLE  ── wake_pps / wake_mbps ──► ACTIVE ── quiet clear_seconds �
   `/sys/fs/bpf` (systemd mounts it)
 - clang, llvm, libbpf and libxdp (both linked in statically: voidgate
   needs neither at run time), bpftool, libelf
+- [sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s header, the
+  flow table voidgate reads: `make -C ../sw_flowd install-header` (or its
+  `make install`) puts it in `/usr/local/seawall/include`;
+  `SW_FLOWD_PREFIX` points elsewhere
 - `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`, which libxdp needs to
   read the hook's programs and use its dispatcher (root is fine)
 

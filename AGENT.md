@@ -124,6 +124,12 @@ sudo t/integration/resty.sh       # needs nginx + lua module; else skips
 
 Needs clang, llvm, libbpf, libxdp, bpftool, libelf, libtest-base-perl,
 root (or `CAP_BPF` + `CAP_NET_ADMIN`). Kernel 5.10+ with BTF; bpffs.
+sw_flowd's installed header, `<sw_flowd/sw_flowd.h>`, from
+`$(SW_FLOWD_PREFIX)/include` (default `/usr/local/seawall`; sw_flowd's
+`make install-header`). Never copy it here: the table's layout is
+sw_flowd's, and voidgate refuses a table of another one. voidgate binds
+sw_flowd's pinned maps when it opens the object (`bpf_map__reuse_fd`, in
+`skel_open()`): no slots, no re-sync; sw_flowd starts first.
 
 Attach (`vg_attach()`): libxdp's dispatcher at priority 10, native or SKB
 as the kernel picks (`xdp_mode`). A program that is not a dispatcher on

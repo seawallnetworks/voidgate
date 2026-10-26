@@ -6,6 +6,10 @@ BPFTOOL ?= bpftool
 # The Seawall stack's prefix, which it shares with mini-fw, sw_authd...
 PREFIX  ?= /usr/local/seawall
 CONFDIR ?= $(PREFIX)/etc/voidgate
+# sw_flowd's header, <sw_flowd/sw_flowd.h>: the flow table voidgate reads
+# (sw_flowd's "make install-header" puts it there)
+SW_FLOWD_PREFIX ?= $(PREFIX)
+SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
 # The stack's OpenResty's site lualib; another OpenResty, Kong / APISIX:
 # point at their Lua path.
 LUA_DIR ?= $(PREFIX)/openresty/site/lualib
@@ -17,7 +21,8 @@ MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
 SRC     := src
 BPFDIR  := src/bpf
 CFLAGS  := -O2 -g -Wall -Wextra -Wno-unused-parameter -MMD -MP \
-	-I$(SRC) -I$(BPFDIR) -DVG_CONF_PATH='"$(CONFDIR)/voidgate.conf"'
+	-I$(SRC) -I$(BPFDIR) -I$(SW_FLOWD_PREFIX)/include \
+	-DVG_CONF_PATH='"$(CONFDIR)/voidgate.conf"'
 # libxdp and libbpf linked in statically, so voidgate needs neither on the
 # machine (libxdp carries its dispatcher in it); libelf and zlib (and
 # libzstd) they need stay shared
@@ -25,7 +30,7 @@ LDFLAGS := $(patsubst -lbpf,-l:libbpf.a,$(patsubst -lxdp,-l:libxdp.a, \
 	$(or $(shell pkg-config --static --libs libxdp 2>/dev/null), \
 	-lxdp -lbpf -lelf -lz)))
 BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(ARCH) \
-	-I$(SRC) -I$(BPFDIR) \
+	-I$(SRC) -I$(BPFDIR) -I$(SW_FLOWD_PREFIX)/include \
 	-Wall -Wno-unused-value -Wno-pointer-sign \
 	-Wno-compare-distinct-pointer-types \
 	-MMD -MP \
@@ -39,9 +44,14 @@ CTL_OBJS  := src/voidgatectl.o
 
 all: voidgate voidgatectl t/unit/policy t/unit/cidr
 
-$(BPFDIR)/voidgate.bpf.o: $(BPFDIR)/voidgate.bpf.c $(BPFDIR)/voidgate.h
+$(BPFDIR)/voidgate.bpf.o: $(BPFDIR)/voidgate.bpf.c $(BPFDIR)/voidgate.h $(SW_FLOWD_H)
 	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
 	$(LLVM_STRIP) -g $@
+
+$(SW_FLOWD_H):
+	@echo "$@ missing: install sw_flowd's header first" \
+		"(make -C ../sw_flowd install-header), or set SW_FLOWD_PREFIX" >&2
+	@exit 1
 
 $(BPFDIR)/voidgate.skel.h: $(BPFDIR)/voidgate.bpf.o
 	$(BPFTOOL) gen skeleton $< > $@
