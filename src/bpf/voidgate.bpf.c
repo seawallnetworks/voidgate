@@ -39,7 +39,7 @@ static __always_inline int v4_in_lpm(void *map, __be32 ip);
 static __always_inline int v6_in_lpm(void *map, const __u8 addr[16]);
 static __always_inline int v6_is_linklocal(const __u8 addr[16]);
 static __always_inline int v6_is_mcast_link(const __u8 addr[16]);
-static __always_inline void acc_in(struct host_counters *c, __u64 pkts,
+static __always_inline void host_count_in(struct host_counters *c, __u64 pkts,
     __u64 bytes);
 static __always_inline int v4_dhcp_allowed(__be32 daddr, __u16 sport,
     __u16 dport);
@@ -290,7 +290,7 @@ v6_is_mcast_link(const __u8 addr[16])
     })
 
 static __always_inline void
-acc_in(struct host_counters *c, __u64 pkts, __u64 bytes)
+host_count_in(struct host_counters *c, __u64 pkts, __u64 bytes)
 {
     if (c == NULL) {
         return;
@@ -537,7 +537,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         if (local && is_reply(c, SF_FAMILY_V4, pm.l4_proto, &saddr, sport,
                               dport, tcp_flags))
         {
-            acc_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
 
             if (m != NULL) {
                 m->reply_passed += pkts;
@@ -562,8 +562,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         }
 
         if (local) {
-            acc_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
-            acc_in(VG_HASH_GET(remote_v4, &saddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(remote_v4, &saddr, m), pkts, pkt_len);
         }
 
         return pass(m, pkts);
@@ -618,7 +618,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         if (local && is_reply(c, SF_FAMILY_V6, pm.l4_proto, saddr.addr, sport,
                               dport, tcp_flags))
         {
-            acc_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
 
             if (m != NULL) {
                 m->reply_passed += pkts;
@@ -645,8 +645,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         }
 
         if (local) {
-            acc_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
-            acc_in(VG_HASH_GET(remote_v6, &saddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
+            host_count_in(VG_HASH_GET(remote_v6, &saddr, m), pkts, pkt_len);
         }
 
         return pass(m, pkts);
