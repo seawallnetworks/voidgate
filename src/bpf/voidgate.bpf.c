@@ -54,8 +54,6 @@ static __always_inline int v6_hop_limit(void *data, void *data_end,
 static __always_inline int is_reply(const struct vg_cfg *c,
     __u8 family, __u8 proto, const void *saddr, __u16 sport, __u16 dport,
     __u8 tcp_flags);
-static __always_inline int pass(struct vg_metrics *m, __u64 pkts);
-static __always_inline int parse_fail(struct vg_metrics *m);
 
 /* Userspace ARRAY[1]: armed and allow_ports. XDP reads. */
 struct {
@@ -433,28 +431,6 @@ is_reply(const struct vg_cfg *c, __u8 family, __u8 proto,
 }
 
 
-static __always_inline int
-pass(struct vg_metrics *m, __u64 pkts)
-{
-    if (m != NULL) {
-        m->passed += pkts;
-    }
-
-    return VG_PASS;
-}
-
-
-static __always_inline int
-parse_fail(struct vg_metrics *m)
-{
-    if (m != NULL) {
-        m->parse_err++;
-    }
-
-    return VG_PASS;
-}
-
-
 /* An armed gate's verdict on the frame at data: pkts packets (more than
  * one for a GRO'd skb at TC) of pkt_len bytes in all.
  *
@@ -485,11 +461,15 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             m->non_ip++;
         }
 
-        return pass(m, pkts);
+        goto pass;
     }
 
     if (pm.family == 0) {
-        return parse_fail(m);
+        if (m != NULL) {
+            m->parse_err++;
+        }
+
+        return VG_PASS;
     }
 
     if (rc == PKT_OK) {
@@ -543,7 +523,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
                 m->reply_passed += pkts;
             }
 
-            return pass(m, pkts);
+            goto pass;
         }
 
         if (v4_in_lpm(&drop_v4, saddr) || v4_in_lpm(&drop_v4, daddr)) {
@@ -566,7 +546,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             host_count_in(VG_HASH_GET(remote_v4, &saddr, m), pkts, pkt_len);
         }
 
-        return pass(m, pkts);
+        goto pass;
     }
 
     /* PKT_V6 */
@@ -624,7 +604,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
                 m->reply_passed += pkts;
             }
 
-            return pass(m, pkts);
+            goto pass;
         }
 
         if (v6_in_lpm(&drop_v6, saddr.addr)
@@ -649,8 +629,16 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             host_count_in(VG_HASH_GET(remote_v6, &saddr, m), pkts, pkt_len);
         }
 
-        return pass(m, pkts);
+        goto pass;
     }
+
+    pass:
+
+    if (m != NULL) {
+        m->passed += pkts;
+    }
+
+    return VG_PASS;
 }
 
 
@@ -688,7 +676,10 @@ voidgate_xdp(struct xdp_md *ctx)
     c = get_cfg();
 
     if (c == NULL || c->armed == 0) {
-        pass(m, 1);
+        if (m != NULL) {
+            m->passed++;
+        }
+
         return XDP_PASS;
     }
 
@@ -719,7 +710,10 @@ voidgate_tc(struct __sk_buff *ctx)
     c = get_cfg();
 
     if (c == NULL || c->armed == 0) {
-        pass(m, pkts);
+        if (m != NULL) {
+            m->passed += pkts;
+        }
+
         return TC_ACT_UNSPEC;
     }
 

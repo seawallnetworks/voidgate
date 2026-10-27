@@ -41,7 +41,8 @@ struct host_counters {
 struct vg_metrics {
     __u64  rx_pkts;    /* packets seen, idle and armed */
     __u64  rx_bytes;   /* L2 bytes of rx_pkts */
-    __u64  passed;     /* passed via pass(); not parse_fail */
+    __u64  passed;     /* passed, idle or judged; not one with no
+                          addresses, in parse_err only */
     __u64  dropped;    /* dropped by the drop LPM */
     __u64  non_ip;     /* armed, not IPv4/IPv6 */
     __u64  map_full;   /* host/remote hash insert failed */
