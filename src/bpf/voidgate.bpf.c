@@ -279,7 +279,7 @@ v6_is_mcast_link(const __u8 addr[16])
             bpf_map_update_elem(&(map), (keyp), &_zero, BPF_NOEXIST); \
             _c = bpf_map_lookup_elem(&(map), (keyp)); \
             \
-            if (_c == NULL && (m) != NULL) { \
+            if (_c == NULL) { \
                 (m)->map_full++; \
             } \
         } \
@@ -457,17 +457,13 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
     rc = pkt_parse(data, data_end, &pm);
 
     if (rc == PKT_NOT_IP) {
-        if (m != NULL) {
-            m->non_ip++;
-        }
+        m->non_ip++;
 
         goto pass;
     }
 
     if (pm.family == 0) {
-        if (m != NULL) {
-            m->parse_err++;
-        }
+        m->parse_err++;
 
         return VG_PASS;
     }
@@ -484,7 +480,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         tcp_flags = 0;
         icmp6_type = 0;
 
-        if (rc != PKT_NO_L4 && m != NULL) {
+        if (rc != PKT_NO_L4) {
             m->parse_err++;
         }
     }
@@ -519,17 +515,13 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         {
             host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
 
-            if (m != NULL) {
-                m->reply_passed += pkts;
-            }
+            m->reply_passed += pkts;
 
             goto pass;
         }
 
         if (v4_in_lpm(&drop_v4, saddr) || v4_in_lpm(&drop_v4, daddr)) {
-            if (m != NULL) {
-                m->dropped += pkts;
-            }
+            m->dropped += pkts;
 
             return VG_DROP;
         }
@@ -600,9 +592,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         {
             host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
 
-            if (m != NULL) {
-                m->reply_passed += pkts;
-            }
+            m->reply_passed += pkts;
 
             goto pass;
         }
@@ -610,9 +600,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         if (v6_in_lpm(&drop_v6, saddr.addr)
             || v6_in_lpm(&drop_v6, daddr.addr))
         {
-            if (m != NULL) {
-                m->dropped += pkts;
-            }
+            m->dropped += pkts;
 
             return VG_DROP;
         }
@@ -634,9 +622,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
     pass:
 
-    if (m != NULL) {
-        m->passed += pkts;
-    }
+    m->passed += pkts;
 
     return VG_PASS;
 }
@@ -645,10 +631,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 static __always_inline void
 rx_count(struct vg_metrics *m, __u64 pkts, __u64 bytes)
 {
-    if (m != NULL) {
-        m->rx_pkts += pkts;
-        m->rx_bytes += bytes;
-    }
+    m->rx_pkts += pkts;
+    m->rx_bytes += bytes;
 }
 
 
@@ -671,14 +655,19 @@ voidgate_xdp(struct xdp_md *ctx)
     struct vg_cfg *c;
     __u64 pkt_len = bpf_xdp_get_buff_len(ctx);
 
+    /* never NULL, key 0 of a one-entry array: checked once here for
+     * the verifier, which knows it from then on, inlined calls included
+     */
+    if (m == NULL) {
+        return XDP_PASS;
+    }
+
     rx_count(m, 1, pkt_len);
 
     c = get_cfg();
 
     if (c == NULL || c->armed == 0) {
-        if (m != NULL) {
-            m->passed++;
-        }
+        m->passed++;
 
         return XDP_PASS;
     }
@@ -705,14 +694,19 @@ voidgate_tc(struct __sk_buff *ctx)
     __u64 pkts = ctx->gso_segs ? ctx->gso_segs : 1;
     __u32 want;
 
+    /* never NULL, key 0 of a one-entry array: checked once here for
+     * the verifier, which knows it from then on, inlined calls included
+     */
+    if (m == NULL) {
+        return TC_ACT_UNSPEC;
+    }
+
     rx_count(m, pkts, ctx->len);
 
     c = get_cfg();
 
     if (c == NULL || c->armed == 0) {
-        if (m != NULL) {
-            m->passed += pkts;
-        }
+        m->passed += pkts;
 
         return TC_ACT_UNSPEC;
     }
