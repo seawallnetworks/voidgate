@@ -130,6 +130,11 @@ sw_flowd's installed header, `<sw_flowd/sw_flowd.h>`, from
 sw_flowd's, and voidgate refuses a table of another one. voidgate binds
 sw_flowd's pinned maps when it opens the object (`bpf_map__reuse_fd`, in
 `skel_open()`): no slots, no re-sync; sw_flowd starts first.
+libpkt's installed headers, `<libpkt/parse.h>`, from
+`$(LIBPKT_PREFIX)/include` (default `/usr/local/seawall`; libpkt's
+`make install`): the stack's packet parser (Seawall proposal 0010).
+`vg_judge()` runs `pkt_parse()` and maps its status to a verdict; a
+parsing fix goes in libpkt, not here.
 
 Attach (`vg_attach()`): libxdp's dispatcher at priority 10, native or SKB
 as the kernel picks (`xdp_mode`). A program that is not a dispatcher on
@@ -154,7 +159,8 @@ runs the verdicts at TC (`make test` runs all three hooks), and
 - Commit messages: `type: summary` (types: `feature`, `bugfix`, `doc`,
   `tests`, `optimize`, `style`). Wrap every line at 80 characters.
   Example: `style: 4-space indent and braced if/else`.
-- Verifier first: bounded unrolls (`VG_MAX_VLANS`, `VG_MAX_ALLOW_PORTS`),
+- Verifier first: bounded unrolls (`VG_MAX_ALLOW_PORTS`; libpkt's
+  `PKT_MAX_VLANS` and `PKT_MAX_IPV6_EXT`),
   `data_end` checks before every packet deref. If a BPF change compiles
   but the daemon cannot load the object (see `daemon.log` printed by
   `t/bin/run`), the verifier rejected it — fix the program, do

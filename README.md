@@ -31,6 +31,9 @@ IDLE  ── wake_pps / wake_mbps ──► ACTIVE ── quiet clear_seconds �
   flow table voidgate reads: `make -C ../sw_flowd install-header` (or its
   `make install`) puts it in `/usr/local/seawall/include`;
   `SW_FLOWD_PREFIX` points elsewhere
+- [libpkt](https://github.com/seawallnetworks/libpkt), the stack's packet
+  parser: `make -C ../libpkt install` puts its headers in
+  `/usr/local/seawall/include`; `LIBPKT_PREFIX` points elsewhere
 - `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`, which libxdp needs to
   read the hook's programs and use its dispatcher (root is fine)
 

@@ -24,19 +24,12 @@
 #include <bpf/bpf_endian.h>
 #include <xdp/xdp_helpers.h>
 #include "voidgate.h"
+#include <libpkt/parse.h>
 #include <sw_flowd/sw_flowd.h>
 
 /* vg_judge()'s verdict; each entry turns it into its hook's. */
 #define VG_PASS  0
 #define VG_DROP  1
-
-/* What vg_judge() reads, but for IPv6 with long extension headers:
- * Ethernet, two VLAN tags, IPv6 or IPv4 with options, a few extension
- * headers, TCP. The TC entry pulls this much into the skb's linear part.
- */
-#define VG_HDR_MAX  256
-
-#define VG_TCP_ACK  0x10
 
 
 static __always_inline struct vg_metrics *get_metrics(void);
@@ -56,13 +49,11 @@ static __always_inline int v4_tcp_allowed(const struct vg_cfg *c,
     __be32 saddr, __be32 daddr, __u16 sport, __u16 dport);
 static __always_inline int v6_tcp_allowed(const struct vg_cfg *c,
     const __u8 saddr[16], const __u8 daddr[16], __u16 sport, __u16 dport);
-static __always_inline int parse_l4(void *l4, void *data_end, __u8 proto,
-    __u16 *sport, __u16 *dport, __u8 *tcp_flags, __u8 *icmp6_type);
+static __always_inline int v6_hop_limit(void *data, void *data_end,
+    __u16 l3_off);
 static __always_inline int is_reply(const struct vg_cfg *c,
     __u8 family, __u8 proto, const void *saddr, __u16 sport, __u16 dport,
     __u8 tcp_flags);
-static __always_inline int v6_walk_ext(void *data_end, void **l4p,
-    __u8 *protop);
 static __always_inline int pass(struct vg_metrics *m, __u64 pkts);
 static __always_inline int parse_fail(struct vg_metrics *m);
 
@@ -384,119 +375,25 @@ v6_tcp_allowed(const struct vg_cfg *c,
 }
 
 
-static __always_inline int
-parse_l4(void *l4, void *data_end, __u8 proto,
-    __u16 *sport, __u16 *dport, __u8 *tcp_flags,
-    __u8 *icmp6_type)
-{
-    *sport = 0;
-    *dport = 0;
-    *tcp_flags = 0;
-
-    if (icmp6_type != NULL) {
-        *icmp6_type = 0;
-    }
-
-    if (proto == VG_IPPROTO_TCP) {
-        struct vg_tcphdr *th = l4;
-
-        if ((void *) (th + 1) > data_end) {
-            return -1;
-        }
-
-        *sport = bpf_ntohs(th->source);
-        *dport = bpf_ntohs(th->dest);
-        *tcp_flags = th->flags;
-        return 0;
-    }
-
-    if (proto == VG_IPPROTO_UDP) {
-        struct vg_udphdr *uh = l4;
-
-        if ((void *) (uh + 1) > data_end) {
-            return -1;
-        }
-
-        *sport = bpf_ntohs(uh->source);
-        *dport = bpf_ntohs(uh->dest);
-        return 0;
-    }
-
-    if (proto == VG_IPPROTO_ICMPV6 && icmp6_type) {
-        struct vg_icmpv6hdr *ih = l4;
-
-        if ((void *) (ih + 1) > data_end) {
-            return -1;
-        }
-
-        *icmp6_type = ih->type;
-        return 0;
-    }
-
-    return 0;
-}
-
-
-/* 1: try L4 at *l4p. 0: no L4 (non-first fragment). -1: truncated extension.
- * Never takes a verdict — caller still runs allow/drop with whatever
- * ports it has.
+/* The hop limit of the IPv6 header at l3_off, which pkt_meta does not
+ * keep; 0 if it is not there.
  */
 static __always_inline int
-v6_walk_ext(void *data_end, void **l4p, __u8 *protop)
+v6_hop_limit(void *data, void *data_end, __u16 l3_off)
 {
-    void *l4 = *l4p;
-    __u8 proto = *protop;
-    int i;
+    struct ipv6hdr *ip6;
 
-#pragma unroll
-    for (i = 0; i < VG_MAX_IPV6_EXT; i++) {
-        __u8 *ext = l4;
-        __u32 len;
-
-        if (proto == VG_IPPROTO_FRAGMENT) {
-            struct vg_ip6_frag *fh = l4;
-
-            if ((void *) (fh + 1) > data_end) {
-                return -1;
-            }
-
-            proto = fh->nexthdr;
-            l4 = (void *) (fh + 1);
-
-            if (bpf_ntohs(fh->frag_off) & 0xfff8) {
-                *l4p = l4;
-                *protop = proto;
-                return 0;
-            }
-
-            continue;
-        }
-
-        if (proto != VG_IPPROTO_HOPOPTS && proto != VG_IPPROTO_ROUTING
-            && proto != VG_IPPROTO_DSTOPTS && proto != VG_IPPROTO_AH)
-        {
-            break;
-        }
-
-        if ((void *) (ext + 2) > data_end) {
-            return -1;
-        }
-
-        len = proto == VG_IPPROTO_AH ? ((__u32) ext[1] + 2) * 4
-              : ((__u32) ext[1] + 1) * 8;
-
-        if ((void *) (ext + len) > data_end) {
-            return -1;
-        }
-
-        proto = ext[0];
-        l4 = ext + len;
+    if (l3_off > PKT_L2_MAX) {
+        return 0;
     }
 
-    *l4p = l4;
-    *protop = proto;
+    ip6 = data + l3_off;
 
-    return 1;
+    if ((void *) (ip6 + 1) > data_end) {
+        return 0;
+    }
+
+    return ip6->hop_limit;
 }
 
 
@@ -514,11 +411,11 @@ is_reply(const struct vg_cfg *c, __u8 family, __u8 proto,
     __u64 seen;
     __u32 zero = 0;
 
-    if (proto == VG_IPPROTO_TCP && !(tcp_flags & VG_TCP_ACK)) {
+    if (proto == IPPROTO_TCP && !(tcp_flags & PKT_TCP_ACK)) {
         return 0;
     }
 
-    if (proto == VG_IPPROTO_UDP) {
+    if (proto == IPPROTO_UDP) {
         fc = bpf_map_lookup_elem(&flows_config, &zero);
 
         if (fc == NULL || dport < fc->port_lo || dport > fc->port_hi) {
@@ -560,92 +457,75 @@ parse_fail(struct vg_metrics *m)
 
 /* An armed gate's verdict on the frame at data: pkts packets (more than
  * one for a GRO'd skb at TC) of pkt_len bytes in all.
+ *
+ * What libpkt's parse reached decides what is judged: not IP, passed;
+ * no addresses, passed uncounted; addresses with no trustworthy L4 (a bad
+ * or truncated header), counted in parse_err and judged without ports,
+ * so the drop LPM still applies and the port exemptions cannot; a
+ * non-first fragment or another protocol, judged without ports.
+ *
+ * The ports, TCP flags and ICMPv6 type are read on PKT_OK only, and are 0
+ * otherwise, as libpkt leaves them: read whatever the status, clang
+ * stored them again before each of the parse's early returns, which cost
+ * IPv4 4-11 ns a frame.
  */
 static __always_inline int
 vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
     __u64 pkts, __u64 pkt_len)
 {
-    struct vg_eth *eth;
-    void *nh;
-    __u16 eth_proto;
-    int i;
+    struct pkt_meta pm;
+    __u16 sport, dport;
+    __u8 tcp_flags, icmp6_type;
+    int rc, local = -1;
 
-    if ((void *) data + sizeof(*eth) > data_end) {
+    rc = pkt_parse(data, data_end, &pm);
+
+    if (rc == PKT_NOT_IP) {
+        if (m != NULL) {
+            m->non_ip++;
+        }
+
+        return pass(m, pkts);
+    }
+
+    if (pm.family == 0) {
         return parse_fail(m);
     }
 
-    eth = data;
-    eth_proto = bpf_ntohs(eth->proto);
-    nh = (void *) (eth + 1);
+    if (rc == PKT_OK) {
+        sport = bpf_ntohs(pm.sport);
+        dport = bpf_ntohs(pm.dport);
+        tcp_flags = pm.tcp_flags;
+        icmp6_type = pm.icmp6_type;
 
-#pragma unroll
-    for (i = 0; i < VG_MAX_VLANS; i++) {
-        if (eth_proto != VG_ETH_P_8021Q && eth_proto != VG_ETH_P_8021AD) {
-            break;
-        }
+    } else {
+        sport = 0;
+        dport = 0;
+        tcp_flags = 0;
+        icmp6_type = 0;
 
-        if (nh + sizeof(struct vg_vlan) > data_end) {
-            return parse_fail(m);
-        }
-
-        {
-            struct vg_vlan *vh = nh;
-
-            eth_proto = bpf_ntohs(vh->proto);
-            nh = (void *) (vh + 1);
+        if (rc != PKT_NO_L4 && m != NULL) {
+            m->parse_err++;
         }
     }
 
-    if (eth_proto == VG_ETH_P_IP) {
-        struct vg_iphdr *ip = nh;
-        __u32 ihl;
-        void *l4;
+    if (pm.family == PKT_V4) {
         __be32 saddr, daddr;
-        __u8 proto, tcp_flags = 0;
-        __u16 sport = 0, dport = 0;
-        int first_frag, local = -1;
 
-        if ((void *) (ip + 1) > data_end) {
-            return parse_fail(m);
-        }
-
-        saddr = ip->saddr;
-        daddr = ip->daddr;
-        proto = ip->protocol;
-        ihl = ip->ver_ihl & 0x0f;
-        l4 = (void *) ip + (ihl << 2);
-        first_frag = (bpf_ntohs(ip->frag_off) & 0x1fff) == 0;
-
-        /* A bad IHL still leaves the fixed 20-byte header, and so both
-         * addresses, readable: count it and fall through with no ports,
-         * like a truncated IPv6 extension. The drop LPM still applies;
-         * port exemptions cannot, since there is no trustworthy L4.
-         */
-        if (ihl < 5 || l4 > data_end) {
-            if (m != NULL) {
-                m->parse_err++;
-            }
-
-        } else if (first_frag
-                   && parse_l4(l4, data_end, proto, &sport, &dport,
-                               &tcp_flags, NULL) < 0)
-        {
-            if (m != NULL) {
-                m->parse_err++;
-            }
-        }
+        __builtin_memcpy(&saddr, pm.addr_src, 4);
+        __builtin_memcpy(&daddr, pm.addr_dst, 4);
 
         if (v4_in_lpm(&allow_v4, saddr) || v4_in_lpm(&allow_v4, daddr)) {
             goto v4_count;
         }
 
-        if (proto == VG_IPPROTO_TCP
+        if (pm.l4_proto == IPPROTO_TCP
             && v4_tcp_allowed(c, saddr, daddr, sport, dport))
         {
             goto v4_count;
         }
 
-        if (proto == VG_IPPROTO_UDP
+        if (pm.l4_proto == IPPROTO_UDP
             && v4_dhcp_allowed(daddr, sport, dport))
         {
             goto v4_count;
@@ -654,8 +534,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         local = v4_in_lpm(&local_v4, daddr);
 
         /* not counted against its source, which it would get banned */
-        if (local && is_reply(c, SF_FAMILY_V4, proto, &saddr, sport,
-                                    dport, tcp_flags))
+        if (local && is_reply(c, SF_FAMILY_V4, pm.l4_proto, &saddr, sport,
+                              dport, tcp_flags))
         {
             acc_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
 
@@ -689,41 +569,16 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         return pass(m, pkts);
     }
 
-    if (eth_proto == VG_ETH_P_IPV6) {
-        struct vg_ipv6hdr *ip6 = nh;
-        void *l4;
-        __u8 proto, tcp_flags = 0;
-        __u16 sport = 0, dport = 0;
-        __u8 icmp6_type = 0;
-        int local = -1;
-        struct vg_ip6 saddr = {}, daddr = {};
+    /* PKT_V6 */
+    {
+        struct vg_ip6 saddr, daddr;
 
-        if ((void *) (ip6 + 1) > data_end) {
-            return parse_fail(m);
-        }
-
-        proto = ip6->nexthdr;
-        l4 = (void *) (ip6 + 1);
-        __builtin_memcpy(saddr.addr, ip6->saddr, 16);
-        __builtin_memcpy(daddr.addr, ip6->daddr, 16);
-
-        {
-            int ext_rc = v6_walk_ext(data_end, &l4, &proto);
-
-            if (ext_rc < 0) {
-                if (m != NULL) {
-                    m->parse_err++;
-                }
-
-            } else if (ext_rc > 0
-                    && parse_l4(l4, data_end, proto, &sport, &dport,
-                                &tcp_flags, &icmp6_type) < 0)
-            {
-                if (m != NULL) {
-                    m->parse_err++;
-                }
-            }
-        }
+        /* copied out of pm, not looked up from it in place: so the
+         * verifier merges the parse's paths, and walks 33,000
+         * instructions, not 194,000
+         */
+        __builtin_memcpy(saddr.addr, pm.addr_src, 16);
+        __builtin_memcpy(daddr.addr, pm.addr_dst, 16);
 
         if (v6_is_linklocal(saddr.addr) || v6_is_linklocal(daddr.addr)
             || v6_is_mcast_link(saddr.addr) || v6_is_mcast_link(daddr.addr))
@@ -734,8 +589,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         /* RFC 4861: real NDP is sent with hop limit 255 and the kernel drops
          * anything else, so a routed NS/RA flood cannot use this exemption.
          */
-        if (ip6->hop_limit == VG_NDISC_HOP_LIMIT
-            && icmp6_type >= VG_NDISC_RS && icmp6_type <= VG_NDISC_REDIRECT)
+        if (icmp6_type >= VG_NDISC_RS && icmp6_type <= VG_NDISC_REDIRECT
+            && v6_hop_limit(data, data_end, pm.l3_off) == VG_NDISC_HOP_LIMIT)
         {
             goto v6_count;
         }
@@ -746,13 +601,13 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v6_count;
         }
 
-        if (proto == VG_IPPROTO_TCP
+        if (pm.l4_proto == IPPROTO_TCP
             && v6_tcp_allowed(c, saddr.addr, daddr.addr, sport, dport))
         {
             goto v6_count;
         }
 
-        if (proto == VG_IPPROTO_UDP
+        if (pm.l4_proto == IPPROTO_UDP
             && v6_dhcp_allowed(daddr.addr, sport, dport))
         {
             goto v6_count;
@@ -760,8 +615,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         local = v6_in_lpm(&local_v6, daddr.addr);
 
-        if (local && is_reply(c, SF_FAMILY_V6, proto, saddr.addr,
-                                    sport, dport, tcp_flags))
+        if (local && is_reply(c, SF_FAMILY_V6, pm.l4_proto, saddr.addr, sport,
+                              dport, tcp_flags))
         {
             acc_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
 
@@ -796,12 +651,6 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         return pass(m, pkts);
     }
-
-    if (m != NULL) {
-        m->non_ip++;
-    }
-
-    return pass(m, pkts);
 }
 
 
@@ -875,13 +724,14 @@ voidgate_tc(struct __sk_buff *ctx)
     }
 
     /* A TC program reads only the skb's linear part, which may hold just
-     * the Ethernet header. Pull only when it is short: a pull makes the
-     * skb writable, copying a cloned skb's head. One that fails leaves
-     * the short view, judged without ports, like a truncated header.
+     * the Ethernet header. Pull only when it is short of PKT_HDR_MAX, the
+     * most libpkt reads: a pull makes the skb writable, copying a cloned
+     * skb's head. One that fails leaves the short view, judged without
+     * ports, like a truncated header.
      */
     data = (void *) (long) ctx->data;
     data_end = (void *) (long) ctx->data_end;
-    want = ctx->len < VG_HDR_MAX ? ctx->len : VG_HDR_MAX;
+    want = ctx->len < PKT_HDR_MAX ? ctx->len : PKT_HDR_MAX;
 
     if (data + want > data_end) {
         bpf_skb_pull_data(ctx, want);

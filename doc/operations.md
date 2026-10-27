@@ -65,7 +65,9 @@ group `voidgate`, which seawall creates. The build needs sw_flowd's
 header, `<sw_flowd/sw_flowd.h>`, the layout of the flow table voidgate
 reads: sw_flowd's `sudo make install-header` (or its `make install`)
 puts it under `/usr/local/seawall/include`; `make SW_FLOWD_PREFIX=DIR`
-looks in `DIR/include` instead.
+looks in `DIR/include` instead. It needs libpkt's headers too,
+`<libpkt/parse.h>`, the stack's packet parser: libpkt's `sudo make
+install` puts them there; `make LIBPKT_PREFIX=DIR` looks in `DIR/include`.
 
 Host requirements:
 

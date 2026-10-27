@@ -105,3 +105,11 @@ XDP_DROP
 --- setup: drop 2001:db8::bad/128
 --- packets: ipv6 udp [2001:db8::1]:12345 > [2001:db8::10]:80
 --- verdict: XDP_PASS
+
+
+
+=== TEST 12: IPv6 header of another version has no addresses: passed
+--- setup: drop 2001:db8::bad/128
+--- packets: ipv6 udp [2001:db8::bad]:12345 > [2001:db8::10]:80 set@14=80
+--- verdict: XDP_PASS
+--- counters: rx_pkts=1 passed=0 dropped=0 parse_err=1
