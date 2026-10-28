@@ -143,29 +143,23 @@ start_daemon -c append.conf
 grep -q 'append marker' append.log
 stop_daemon
 
-# Foreground remains attached to the launched PID, with default or file log.
-for mode in default config; do
-    cp base.conf foreground.conf
-    if [[ $mode == config ]]; then
-        printf 'log_file = foreground-config.log\n' >> foreground.conf
+# Foreground remains attached to the launched PID and logs to stderr, as
+# under the unit, whatever log_file says: that is -d's.
+cp base.conf foreground.conf
+printf 'log_file = foreground-config.log\n' >> foreground.conf
+"$root/voidgate" -c foreground.conf 2> foreground.err &
+pid=$!
+for attempt in {1..100}; do
+    if status 2>/dev/null; then
+        break
     fi
-    "$root/voidgate" -c foreground.conf 2> foreground.err &
-    pid=$!
-    for attempt in {1..100}; do
-        if status 2>/dev/null; then
-            break
-        fi
-        sleep 0.05
-    done
-    status
-    [[ ! -s foreground.err ]]
-    if [[ $mode == default ]]; then
-        grep -q 'idle on test0' "$work/log/voidgate.log"
-    else
-        grep -q 'idle on test0' "foreground-$mode.log"
-    fi
-    stop_daemon
+    sleep 0.05
 done
+status
+[[ $(readlink "/proc/$pid/fd/2") == "$directory/foreground.err" ]]
+grep -q 'idle on test0' foreground.err
+[[ ! -e foreground-config.log ]]
+stop_daemon
 
 # A second instance must fail without touching the first one's socket,
 # XDP program or pid file.

@@ -326,7 +326,7 @@ drop_remove(struct vg_ctrl *c, struct vg_drop_rec *r)
 
     if (vg_drop_del(c->maps, &r->cidr) < 0 && errno != ENOENT) {
         vg_cidr_to_str(&r->cidr, buf, sizeof(buf));
-        vg_warn("undrop map delete %s failed: %s", buf, strerror(errno));
+        sw_log_warn("undrop map delete %s failed: %s", buf, strerror(errno));
         return -1;
     }
 
@@ -356,7 +356,7 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
     vg_cidr_to_str(p, buf, sizeof(buf));
 
     if (vg_cidr_is_protected(c->cfg, p)) {
-        vg_log("refuse drop %s (covers local/allow)", buf);
+        sw_log_info("refuse drop %s (covers local/allow)", buf);
         return -1;
     }
 
@@ -371,13 +371,13 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         r = drop_alloc(c);
 
         if (r == NULL) {
-            vg_warn("drop %s refused: drop list full (%u)", buf,
-                    c->drop_pool_cap);
+            sw_log_warn("drop %s refused: drop list full (%u)", buf,
+                        c->drop_pool_cap);
             return -1;
         }
 
         if (vg_drop_add(c->maps, p, reason, (uint32_t) now) < 0) {
-            vg_warn("drop map update %s failed: %s", buf, strerror(errno));
+            sw_log_warn("drop map update %s failed: %s", buf, strerror(errno));
             vg_list_add_tail(&r->all, &c->drop_free);
             return -1;
         }
@@ -407,7 +407,7 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         }
 
         if (vg_drop_add(c->maps, p, reason, (uint32_t) now) < 0) {
-            vg_warn("drop map update %s failed: %s", buf, strerror(errno));
+            sw_log_warn("drop map update %s failed: %s", buf, strerror(errno));
             return -1;
         }
 
@@ -418,10 +418,8 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         }
     }
 
-    if (vg_verbose >= 1) {
-        vg_log("drop %s (%s)%s", buf, reason_name(reason),
-               again ? " again" : "");
-    }
+    sw_log_debug("drop %s (%s)%s", buf, reason_name(reason),
+                 again ? " again" : "");
 
     if (again) {
         c->drops_again++;
@@ -470,11 +468,11 @@ vg_ctrl_undrop(struct vg_ctrl *c, const struct vg_cidr *p)
 
     /* Not listed: still clear a stray map entry. */
     } else if (vg_drop_del(c->maps, p) < 0 && errno != ENOENT) {
-        vg_warn("undrop map delete %s failed: %s", buf, strerror(errno));
+        sw_log_warn("undrop map delete %s failed: %s", buf, strerror(errno));
         return -1;
     }
 
-    vg_log("undrop %s", buf);
+    sw_log_info("undrop %s", buf);
 
     return 0;
 }
@@ -503,7 +501,7 @@ vg_ctrl_prune_protected(struct vg_ctrl *c)
         }
 
         vg_cidr_to_str(&r->cidr, buf, sizeof(buf));
-        vg_warn("reload: undrop %s (now covers local/allow)", buf);
+        sw_log_warn("reload: undrop %s (now covers local/allow)", buf);
 
         if (drop_remove(c, r) == 0) {
             n++;
@@ -525,12 +523,12 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
     c->quiet_since = 0;
 
     if (vg_cfg_commit(c->maps, 1, c->cfg) < 0) {
-        vg_warn("arm cfg commit failed: %s", strerror(errno));
+        sw_log_warn("arm cfg commit failed: %s", strerror(errno));
         return -1;
     }
 
     c->state = VG_ACTIVE;
-    vg_log("armed (%s)", why != NULL ? why : "");
+    sw_log_info("armed (%s)", why != NULL ? why : "");
 
     return 0;
 }
@@ -544,13 +542,13 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
     drops_reset(c);
 
     if (vg_cfg_commit(c->maps, 0, c->cfg) < 0) {
-        vg_warn("disarm cfg commit failed: %s", strerror(errno));
+        sw_log_warn("disarm cfg commit failed: %s", strerror(errno));
         return -1;
     }
 
     c->state = VG_IDLE;
     c->quiet_since = 0;
-    vg_log("disarmed (%s)", why != NULL ? why : "");
+    sw_log_info("disarmed (%s)", why != NULL ? why : "");
 
     return 0;
 }
@@ -732,9 +730,9 @@ expire_drops(struct vg_ctrl *c)
             continue;
         }
 
-        if (vg_verbose >= 1) {
+        if (sw_log_enabled(SW_LOG_DEBUG)) {
             vg_cidr_to_str(&r->cidr, buf, sizeof(buf));
-            vg_log("expire %s (%s)", buf, reason_name(r->reason));
+            sw_log_debug("expire %s (%s)", buf, reason_name(r->reason));
         }
 
         by[r->reason <= VG_REASON_TIMED ? r->reason : 0]++;
@@ -748,13 +746,13 @@ expire_drops(struct vg_ctrl *c)
     logged_list(list, sizeof(list), shown, n);
 
     if (n <= VG_LOG_CIDRS) {
-        vg_log("expired %s; %d left", list, c->drop_count);
+        sw_log_info("expired %s; %d left", list, c->drop_count);
 
     } else {
-        vg_log("expired %d drops (policy %d, aggregate %d, timed %d), "
-               "first %s; %d left", n, by[VG_REASON_POLICY],
-               by[VG_REASON_AGGREGATE], by[VG_REASON_TIMED], list,
-               c->drop_count);
+        sw_log_info("expired %d drops (policy %d, aggregate %d, timed %d), "
+                    "first %s; %d left", n, by[VG_REASON_POLICY],
+                    by[VG_REASON_AGGREGATE], by[VG_REASON_TIMED], list,
+                    c->drop_count);
     }
 }
 
@@ -826,24 +824,24 @@ log_drops(struct vg_ctrl *c)
     }
 
     if (n == 0 && c->drops_again > 0) {
-        vg_log("dropped %d listed prefix%s again; %d listed",
-               c->drops_again, c->drops_again == 1 ? "" : "es",
-               c->drop_count);
+        sw_log_info("dropped %d listed prefix%s again; %d listed",
+                    c->drops_again, c->drops_again == 1 ? "" : "es",
+                    c->drop_count);
 
     } else if (n > 0) {
         logged_list(list, sizeof(list), c->drops_shown, c->drops_shown_n);
 
         if (n <= VG_LOG_CIDRS) {
-            vg_log("dropped %s; %s%d listed", list, again, c->drop_count);
+            sw_log_info("dropped %s; %s%d listed", list, again, c->drop_count);
 
         } else {
-            vg_log("dropped %d prefixes (manual %d, policy %d, "
-                   "aggregate %d, timed %d), first %s; %s%d listed", n,
-                   c->drops_new[VG_REASON_MANUAL],
-                   c->drops_new[VG_REASON_POLICY],
-                   c->drops_new[VG_REASON_AGGREGATE],
-                   c->drops_new[VG_REASON_TIMED], list, again,
-                   c->drop_count);
+            sw_log_info("dropped %d prefixes (manual %d, policy %d, "
+                        "aggregate %d, timed %d), first %s; %s%d listed", n,
+                        c->drops_new[VG_REASON_MANUAL],
+                        c->drops_new[VG_REASON_POLICY],
+                        c->drops_new[VG_REASON_AGGREGATE],
+                        c->drops_new[VG_REASON_TIMED], list, again,
+                        c->drop_count);
         }
     }
 
@@ -925,9 +923,9 @@ vg_ctrl_tick(struct vg_ctrl *c)
     walk_remotes(c, dt);
     expire_drops(c);
 
-    vg_vlog("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
-            "dropped(pps)=%-8.0f prefixes=%d",
-            "active", c->rx_pps, c->rx_bps / 1e6, drop_pps, c->drop_count);
+    sw_log_debug("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
+                 "dropped(pps)=%-8.0f prefixes=%d",
+                 "active", c->rx_pps, c->rx_bps / 1e6, drop_pps, c->drop_count);
 
     if (c->rx_pps < (double) c->cfg->wake_pps
         && c->rx_bps < (double) c->cfg->wake_mbps * 1000000.0)

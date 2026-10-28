@@ -8,6 +8,8 @@
 #include "log.h"
 #include "maps.h"
 
+#include <sw/notify.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -78,16 +80,19 @@ usage(const char *argv0)
 }
 
 
+/* -d: the log file becomes stderr, so lines are formatted for a file */
 static void
 redirect_log(int fd)
 {
     if (dup2(fd, STDERR_FILENO) < 0) {
-        vg_die("redirect log: %s", strerror(errno));
+        sw_log_fatal("redirect log: %s", strerror(errno));
     }
 
     if (fd != STDERR_FILENO) {
         close(fd);
     }
+
+    sw_log_init("voidgate");
 }
 
 
@@ -100,14 +105,14 @@ daemon_start(int log_fd)
     ssize_t  n;
 
     if (pipe(pipefd) < 0) {
-        vg_die("startup pipe: %s", strerror(errno));
+        sw_log_fatal("startup pipe: %s", strerror(errno));
     }
 
     fflush(NULL);
     child = fork();
 
     if (child < 0) {
-        vg_die("fork: %s", strerror(errno));
+        sw_log_fatal("fork: %s", strerror(errno));
     }
 
     if (child > 0) {
@@ -121,7 +126,7 @@ daemon_start(int log_fd)
         close(pipefd[0]);
 
         if (n != sizeof(daemon_pid)) {
-            vg_die("daemon startup failed; check the log file");
+            sw_log_fatal("daemon startup failed; check the log file");
         }
 
         fprintf(stderr, "voidgate daemon started (pid %ld)\n",
@@ -133,17 +138,17 @@ daemon_start(int log_fd)
     redirect_log(log_fd);
 
     if (setsid() < 0) {
-        vg_die("setsid: %s", strerror(errno));
+        sw_log_fatal("setsid: %s", strerror(errno));
     }
 
     fd = open("/dev/null", O_RDWR);
 
     if (fd < 0) {
-        vg_die("open /dev/null: %s", strerror(errno));
+        sw_log_fatal("open /dev/null: %s", strerror(errno));
     }
 
     if (dup2(fd, STDIN_FILENO) < 0 || dup2(fd, STDOUT_FILENO) < 0) {
-        vg_die("redirect standard streams: %s", strerror(errno));
+        sw_log_fatal("redirect standard streams: %s", strerror(errno));
     }
 
     if (fd > STDERR_FILENO) {
@@ -169,7 +174,7 @@ pid_lock(const char *path)
     fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
 
     if (fd < 0) {
-        vg_die("open pid file %s: %s", path, strerror(errno));
+        sw_log_fatal("open pid file %s: %s", path, strerror(errno));
     }
 
     if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
@@ -177,14 +182,14 @@ pid_lock(const char *path)
     }
 
     if (errno != EWOULDBLOCK) {
-        vg_die("lock pid file %s: %s", path, strerror(errno));
+        sw_log_fatal("lock pid file %s: %s", path, strerror(errno));
     }
 
     n = pread(fd, buf, sizeof(buf) - 1, 0);
     buf[n > 0 ? n : 0] = '\0';
     buf[strcspn(buf, "\n")] = '\0';
-    vg_die("voidgate already running (pid %s, %s)",
-           buf[0] != '\0' ? buf : "?", path);
+    sw_log_fatal("voidgate already running (pid %s, %s)",
+                 buf[0] != '\0' ? buf : "?", path);
 }
 
 
@@ -198,7 +203,7 @@ write_pidfile(int fd, const char *path)
 
     if (ftruncate(fd, 0) < 0 || pwrite(fd, buf, (size_t) n, 0) != n) {
         unlink(path);
-        vg_die("write pid file %s: %s", path, strerror(errno));
+        sw_log_fatal("write pid file %s: %s", path, strerror(errno));
     }
 }
 
@@ -215,7 +220,7 @@ daemon_stop(const char *path)
     fd = open(path, O_RDONLY);
 
     if (fd < 0) {
-        vg_die("open pid file %s: %s", path, strerror(errno));
+        sw_log_fatal("open pid file %s: %s", path, strerror(errno));
     }
 
     n = read(fd, buf, sizeof(buf) - 1);
@@ -226,21 +231,21 @@ daemon_stop(const char *path)
     if (flock(fd, LOCK_SH | LOCK_NB) == 0) {
         close(fd);
         unlink(path);
-        vg_die("pid file %s is stale: voidgate is not running", path);
+        sw_log_fatal("pid file %s is stale: voidgate is not running", path);
     }
 
     close(fd);
 
     if (n <= 0) {
-        vg_die("read pid file %s: %s", path,
-               n < 0 ? strerror(errno) : "empty");
+        sw_log_fatal("read pid file %s: %s", path,
+                     n < 0 ? strerror(errno) : "empty");
     }
 
     buf[n] = '\0';
     pid = strtol(buf, NULL, 10);
 
     if (pid <= 0) {
-        vg_die("bad pid file %s", path);
+        sw_log_fatal("bad pid file %s", path);
     }
 
     if (kill((pid_t) pid, SIGTERM) < 0) {
@@ -248,7 +253,7 @@ daemon_stop(const char *path)
             unlink(path);
         }
 
-        vg_die("stop pid %ld: %s", pid, strerror(errno));
+        sw_log_fatal("stop pid %ld: %s", pid, strerror(errno));
     }
 
     for (i = 0; i < 200; i++) {
@@ -258,13 +263,13 @@ daemon_stop(const char *path)
                 return;
             }
 
-            vg_die("stop pid %ld: %s", pid, strerror(errno));
+            sw_log_fatal("stop pid %ld: %s", pid, strerror(errno));
         }
 
         nanosleep(&delay, NULL);
     }
 
-    vg_die("stop pid %ld: timed out", pid);
+    sw_log_fatal("stop pid %ld: timed out", pid);
 }
 
 
@@ -278,10 +283,13 @@ main(int argc, char **argv)
     const char *iface_ov = NULL;
     const char *ctl_group = "";
     int opt, ctl_fd = -1, http_fd = -1;
-    int daemon_mode = 0, stop_mode = 0, log_fd, ready_fd = -1, result = 0;
+    int daemon_mode = 0, stop_mode = 0, log_fd = -1, ready_fd = -1;
+    int result = 0;
     int pid_fd;
     struct sigaction sa;
     struct timespec last_tick;
+
+    sw_log_init("voidgate");
 
     while ((opt = getopt(argc, argv, "c:i:g:ds:hv")) != -1) {
         switch (opt) {
@@ -298,6 +306,8 @@ main(int argc, char **argv)
             if (vg_verbose < 2) {
                 vg_verbose++;
             }
+
+            sw_log_set_level(SW_LOG_DEBUG);
             break;
         case 'd':
             daemon_mode = 1;
@@ -317,7 +327,7 @@ main(int argc, char **argv)
     }
 
     if (vg_config_load(cfg_path, &cfg) < 0) {
-        vg_die("failed to load config %s", cfg_path);
+        sw_log_fatal("failed to load config %s", cfg_path);
     }
 
     if (stop_mode) {
@@ -333,7 +343,7 @@ main(int argc, char **argv)
 
     if (vg_ctl_server_alive(VG_SOCK_PATH)) {
         unlink(cfg.pid_file);
-        vg_die("another voidgate is already serving %s", VG_SOCK_PATH);
+        sw_log_fatal("another voidgate is already serving %s", VG_SOCK_PATH);
     }
 
     if (iface_ov != NULL) {
@@ -341,24 +351,25 @@ main(int argc, char **argv)
     }
 
     if (if_nametoindex(cfg.interface) == 0) {
-        vg_die("unknown interface %s", cfg.interface);
+        sw_log_fatal("unknown interface %s", cfg.interface);
     }
 
     if (vg_config_auto_local(&cfg) < 0) {
-        vg_die("failed to read addresses on %s", cfg.interface);
+        sw_log_fatal("failed to read addresses on %s", cfg.interface);
     }
 
-    log_fd = open(cfg.log_file, O_WRONLY | O_CREAT | O_APPEND, 0644);
-
-    if (log_fd < 0) {
-        vg_die("open log %s: %s", cfg.log_file, strerror(errno));
-    }
-
+    /* In the foreground, as under the unit, the log is stderr: the
+     * journal. log_file is for -d, which has no stderr to log to.
+     */
     if (daemon_mode) {
-        ready_fd = daemon_start(log_fd);
+        log_fd = open(cfg.log_file, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC,
+                      0644);
 
-    } else {
-        redirect_log(log_fd);
+        if (log_fd < 0) {
+            sw_log_fatal("open log %s: %s", cfg.log_file, strerror(errno));
+        }
+
+        ready_fd = daemon_start(log_fd);
     }
 
     memset(&sa, 0, sizeof(sa));
@@ -368,7 +379,7 @@ main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     if (vg_maps_open(&maps, &cfg) < 0) {
-        vg_die("BPF maps");
+        sw_log_fatal("BPF maps");
     }
 
     /* Attach loads the object, so the maps are filled after it: until
@@ -376,46 +387,46 @@ main(int argc, char **argv)
      */
     if (vg_attach(&maps, &cfg) < 0) {
         vg_maps_close(&maps);
-        vg_die("attach failed");
+        sw_log_fatal("attach failed");
     }
 
     if (vg_populate_allow(&maps, &cfg) < 0
         || vg_populate_local(&maps, &cfg) < 0)
     {
         vg_maps_close(&maps);
-        vg_die("failed to populate allow/local maps");
+        sw_log_fatal("failed to populate allow/local maps");
     }
 
     if (vg_cfg_commit(&maps, 0, &cfg) < 0) {
         vg_maps_close(&maps);
-        vg_die("failed to commit cfg map");
+        sw_log_fatal("failed to commit cfg map");
     }
 
     if (vg_ctrl_init(&ctrl, &cfg, &maps, cfg_path, iface_ov) < 0) {
         vg_maps_close(&maps);
-        vg_die("control plane init failed");
+        sw_log_fatal("control plane init failed");
     }
 
     ctl_fd = vg_ctl_server_listen(VG_SOCK_PATH, ctl_group);
 
     if (ctl_fd < 0) {
-        vg_warn("ctl socket %s failed: %s (voidgatectl disabled)",
-                VG_SOCK_PATH, strerror(errno));
+        sw_log_warn("ctl socket %s failed: %s (voidgatectl disabled)",
+                    VG_SOCK_PATH, strerror(errno));
 
     } else {
-        vg_log("ctl socket %s", VG_SOCK_PATH);
+        sw_log_info("ctl socket %s", VG_SOCK_PATH);
     }
 
     http_fd = vg_http_listen(cfg.metrics_port);
 
     if (http_fd >= 0) {
-        vg_log("prometheus 127.0.0.1:%d/metrics", cfg.metrics_port);
+        sw_log_info("prometheus 127.0.0.1:%d/metrics", cfg.metrics_port);
     }
 
     vg_log_config(&cfg, vg_hook_name(&maps));
-    vg_log("idle on %s, wake_pps=%llu wake_mbps=%llu", cfg.interface,
-           (unsigned long long)cfg.wake_pps,
-           (unsigned long long)cfg.wake_mbps);
+    sw_log_info("idle on %s, wake_pps=%llu wake_mbps=%llu", cfg.interface,
+                (unsigned long long)cfg.wake_pps,
+                (unsigned long long)cfg.wake_mbps);
 
     write_pidfile(pid_fd, cfg.pid_file);
 
@@ -425,12 +436,19 @@ main(int argc, char **argv)
         if (write(ready_fd, &daemon_pid, sizeof(daemon_pid))
             != sizeof(daemon_pid))
         {
-            vg_warn("failed to report daemon readiness");
+            sw_log_warn("failed to report daemon readiness");
             g_stop = 1;
             result = 1;
         }
 
         close(ready_fd);
+    }
+
+    /* the socket listens and the program is attached: a unit ordered
+     * after voidgate finds both
+     */
+    if (sw_notify_ready() != 0) {
+        sw_log_warn("tell systemd voidgate is ready: %s", strerror(errno));
     }
 
     clock_gettime(CLOCK_MONOTONIC, &last_tick);
@@ -526,7 +544,7 @@ main(int argc, char **argv)
     unlink(cfg.pid_file);
     close(pid_fd);
 
-    vg_log("exit");
+    sw_log_info("exit");
 
     return result;
 }

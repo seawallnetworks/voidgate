@@ -566,11 +566,11 @@ test_expire_log(void)
 
         snprintf(path, sizeof(path), "/tmp/vg-expire-log-XXXXXX");
         saved = log_start(path);
-        vg_verbose = verbose;
+        sw_log_set_level(verbose ? SW_LOG_DEBUG : SW_LOG_INFO);
 
         assert(tick(&c) == 0);
 
-        vg_verbose = 0;
+        sw_log_set_level(SW_LOG_INFO);
         log_stop(saved);
 
         assert(c.drop_count == 0);
@@ -611,7 +611,7 @@ test_drop_log(void)
         assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
         snprintf(path, sizeof(path), "/tmp/vg-drop-log-XXXXXX");
         saved = log_start(path);
-        vg_verbose = verbose;
+        sw_log_set_level(verbose ? SW_LOG_DEBUG : SW_LOG_INFO);
 
         memset(&p, 0, sizeof(p));
         p.family = AF_INET;
@@ -632,7 +632,7 @@ test_drop_log(void)
         assert(tick(&c) == 0);
         assert(tick(&c) == 0);                          /* nothing new */
 
-        vg_verbose = 0;
+        sw_log_set_level(SW_LOG_INFO);
         log_stop(saved);
 
         assert(log_count(path, "dropped 198.18.10.1/32 (timed), "

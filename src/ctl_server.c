@@ -323,7 +323,7 @@ vg_ctrl_reload(struct vg_ctrl *c)
         return -1;
     }
 
-    vg_log("reloaded %s", c->cfg_path);
+    sw_log_info("reloaded %s", c->cfg_path);
 
     return 0;
 }
@@ -399,11 +399,11 @@ vg_ctl_server_listen(const char *path, const char *group)
         gr = getgrnam(group);
 
         if (gr == NULL) {
-            vg_warn("-g %s: no such group", group);
+            sw_log_warn("-g %s: no such group", group);
 
         } else if (chown(path, (uid_t) -1, gr->gr_gid) < 0) {
-            vg_warn("-g %s: chown %s: %s", group, path,
-                    strerror(errno));
+            sw_log_warn("-g %s: chown %s: %s", group, path,
+                        strerror(errno));
         }
     }
 

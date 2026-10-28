@@ -78,7 +78,7 @@ bump_memlock(void)
     struct rlimit r = { RLIM_INFINITY, RLIM_INFINITY };
 
     if (setrlimit(RLIMIT_MEMLOCK, &r) < 0) {
-        vg_warn("setrlimit(RLIMIT_MEMLOCK) failed: %s", strerror(errno));
+        sw_log_warn("setrlimit(RLIMIT_MEMLOCK) failed: %s", strerror(errno));
     }
 }
 
@@ -160,7 +160,7 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     m->sum_scratch = calloc(1, m->sum_scratch_size);
 
     if (m->sum_scratch == NULL) {
-        vg_die("out of memory");
+        sw_log_fatal("out of memory");
     }
 
     flows_open(m);
@@ -168,7 +168,7 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     if (skel_open(m, cfg) < 0) {
         free(m->sum_scratch);
         m->sum_scratch = NULL;
-        vg_die("failed to open BPF object");
+        sw_log_fatal("failed to open BPF object");
     }
 
     return 0;
@@ -200,7 +200,7 @@ skel_open(struct vg_maps *m, const struct vg_config *cfg)
             || bpf_map__reuse_fd(m->skel->maps.flows_config,
                                  m->flows_config_fd) != 0))
     {
-        vg_warn("sw_flowd's flow table: %s", strerror(errno));
+        sw_log_warn("sw_flowd's flow table: %s", strerror(errno));
         voidgate_bpf__destroy(m->skel);
         m->skel = NULL;
         return -1;
@@ -226,7 +226,7 @@ skel_fresh(struct vg_maps *m, const struct vg_config *cfg)
 
     if (skel_open(m, cfg) < 0) {
         m->skel = NULL;
-        vg_warn("failed to open BPF object");
+        sw_log_warn("failed to open BPF object");
         return -1;
     }
 
@@ -278,7 +278,7 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
     int automode, held, err;
 
     if (m->skel == NULL) {
-        vg_warn("attach: BPF object not open");
+        sw_log_warn("attach: BPF object not open");
         return -1;
     }
 
@@ -292,8 +292,8 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
 
     } else {
         if (strcmp(cfg->xdp_mode, "auto") != 0) {
-            vg_warn("xdp_mode %s: not auto, native or skb; taking auto",
-                    cfg->xdp_mode);
+            sw_log_warn("xdp_mode %s: not auto, native or skb; taking auto",
+                        cfg->xdp_mode);
         }
 
         mode = XDP_MODE_NATIVE;
@@ -303,7 +303,7 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
     if (strcmp(cfg->hook, "auto") != 0 && strcmp(cfg->hook, "xdp") != 0
         && strcmp(cfg->hook, "tc") != 0)
     {
-        vg_warn("hook %s: not auto, xdp or tc", cfg->hook);
+        sw_log_warn("hook %s: not auto, xdp or tc", cfg->hook);
         return -1;
     }
 
@@ -321,16 +321,16 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
      * dispatcher, and every program after it finds the hook held.
      */
     if (!bpffs_mounted()) {
-        vg_warn("XDP attach: no bpffs at %s, which libxdp needs to share "
-                "the hook", bpffs_dir());
+        sw_log_warn("XDP attach: no bpffs at %s, which libxdp needs to share "
+                    "the hook", bpffs_dir());
         return -1;
     }
 
     held = xdp_claim(m->ifindex, holder, sizeof(holder), &shared_mode);
 
     if (held < 0) {
-        vg_warn("XDP attach: reading ifindex %d's XDP programs: %s",
-                m->ifindex, strerror(-held));
+        sw_log_warn("XDP attach: reading ifindex %d's XDP programs: %s",
+                    m->ifindex, strerror(-held));
         return -1;
     }
 
@@ -347,8 +347,8 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
          * an MTU over 3498.
          */
         if (err && automode && err != -EBUSY && err != -EEXIST) {
-            vg_warn("native XDP attach failed (%s), falling back to skb",
-                    strerror(-err));
+            sw_log_warn("native XDP attach failed (%s), falling back to skb",
+                        strerror(-err));
             err = attach_xdp(m, cfg, XDP_MODE_SKB);
         }
 
@@ -358,7 +358,7 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
 
         /* attached between xdp_claim() and here */
         if (err != -EBUSY && err != -EEXIST) {
-            vg_warn("XDP attach failed: %s", strerror(-err));
+            sw_log_warn("XDP attach failed: %s", strerror(-err));
             return -1;
         }
 
@@ -366,14 +366,14 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
     }
 
     if (strcmp(cfg->hook, "xdp") == 0) {
-        vg_warn("XDP attach: %s holds ifindex %d's XDP hook without "
-                "libxdp's dispatcher", holder, m->ifindex);
+        sw_log_warn("XDP attach: %s holds ifindex %d's XDP hook without "
+                    "libxdp's dispatcher", holder, m->ifindex);
         return -1;
     }
 
-    vg_warn("degraded: %s holds ifindex %d's XDP hook without libxdp's "
-            "dispatcher; judging at TC ingress, which costs more per drop",
-            holder, m->ifindex);
+    sw_log_warn("degraded: %s holds ifindex %d's XDP hook without libxdp's "
+                "dispatcher; judging at TC ingress, which costs more per drop",
+                holder, m->ifindex);
     m->degraded = 1;
 
     return attach_tc(m, cfg);
@@ -401,7 +401,7 @@ vg_detach(struct vg_maps *m)
         return;
     }
 
-    vg_log("detached %s from ifindex %d", vg_hook_name(m), m->ifindex);
+    sw_log_info("detached %s from ifindex %d", vg_hook_name(m), m->ifindex);
     m->hook = VG_HOOK_NONE;
 }
 
@@ -496,8 +496,8 @@ xdp_claim(int ifindex, char *holder, size_t len,
                 return VG_XDP_HELD;
             }
 
-            vg_warn("removing a voidgate XDP program left on ifindex %d",
-                    ifindex);
+            sw_log_warn("removing a voidgate XDP program left on ifindex %d",
+                        ifindex);
             err = xdp_multiprog__detach(mp);
             xdp_multiprog__close(mp);
 
@@ -523,8 +523,8 @@ xdp_claim(int ifindex, char *holder, size_t len,
         }
 
         /* one at a time: a detach replaces the dispatcher */
-        vg_warn("removing a voidgate XDP program left in ifindex %d's "
-                "dispatcher", ifindex);
+        sw_log_warn("removing a voidgate XDP program left in ifindex %d's "
+                    "dispatcher", ifindex);
         err = xdp_program__detach(p, ifindex,
                                   xdp_multiprog__attach_mode(mp), 0);
         xdp_multiprog__close(mp);
@@ -585,14 +585,14 @@ attach_xdp(struct vg_maps *m, const struct vg_config *cfg,
         m->xdp_mode = xdp_multiprog__attach_mode(mp);
 
         if (xdp_multiprog__is_legacy(mp)) {
-            vg_warn("XDP: libxdp attached voidgate without a dispatcher; "
-                    "no other program can share the hook");
+            sw_log_warn("XDP: libxdp attached voidgate without a dispatcher; "
+                        "no other program can share the hook");
         }
 
         xdp_multiprog__close(mp);
     }
 
-    vg_log("attached %s on ifindex %d", vg_hook_name(m), m->ifindex);
+    sw_log_info("attached %s on ifindex %d", vg_hook_name(m), m->ifindex);
 
     return 0;
 }
@@ -618,7 +618,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
     err = voidgate_bpf__load(m->skel);
 
     if (err) {
-        vg_warn("failed to load BPF object: %d", err);
+        sw_log_warn("failed to load BPF object: %d", err);
         return -1;
     }
 
@@ -629,7 +629,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
         fd = bpf_link_create(prog_fd, m->ifindex, BPF_TCX_INGRESS, &lopts);
 
         if (fd < 0) {
-            vg_warn("tcx attach failed: %s", strerror(errno));
+            sw_log_warn("tcx attach failed: %s", strerror(errno));
             return -1;
         }
 
@@ -640,7 +640,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
         err = bpf_tc_hook_create(&hook);
 
         if (err && err != -EEXIST) {
-            vg_warn("clsact qdisc: %s", strerror(-err));
+            sw_log_warn("clsact qdisc: %s", strerror(-err));
             return -1;
         }
 
@@ -648,14 +648,14 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
         err = bpf_tc_attach(&hook, &topts);
 
         if (err) {
-            vg_warn("TC attach failed: %s", strerror(-err));
+            sw_log_warn("TC attach failed: %s", strerror(-err));
             return -1;
         }
     }
 
     m->hook = VG_HOOK_TC;
-    vg_log("attached %s on ifindex %d%s", vg_hook_name(m), m->ifindex,
-           m->degraded ? " (degraded)" : "");
+    sw_log_info("attached %s on ifindex %d%s", vg_hook_name(m), m->ifindex,
+                m->degraded ? " (degraded)" : "");
 
     return 0;
 }
@@ -968,9 +968,9 @@ flows_open(struct vg_maps *m)
     cfd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_CONFIG);
 
     if (tfd < 0 || cfd < 0) {
-        vg_warn("no sw_flowd flow table under %s: replies to the host's "
-                "own flows are judged as any other until voidgate restarts "
-                "with it (start sw_flowd first)", SF_PIN_ROOT);
+        sw_log_warn("no sw_flowd flow table under %s: replies to the host's "
+                    "own flows are judged as any other until voidgate restarts "
+                    "with it (start sw_flowd first)", SF_PIN_ROOT);
         goto none;
     }
 
@@ -999,15 +999,15 @@ flows_open(struct vg_maps *m)
     m->flows_config_fd = cfd;
     m->flows_size = info.max_entries;
     m->flows_stats_fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_STATS);
-    vg_log("reading sw_flowd's flow table (%u flows): replies to the "
-           "host's own flows pass an armed gate", info.max_entries);
+    sw_log_info("reading sw_flowd's flow table (%u flows): replies to the "
+                "host's own flows pass an armed gate", info.max_entries);
 
     return;
 
 refused:
 
-    vg_warn("sw_flowd's flow table under %s is not the layout this "
-            "voidgate reads: not reading it", SF_PIN_ROOT);
+    sw_log_warn("sw_flowd's flow table under %s is not the layout this "
+                "voidgate reads: not reading it", SF_PIN_ROOT);
 
 none:
 
@@ -1064,10 +1064,10 @@ vg_populate_local(struct vg_maps *m, const struct vg_config *cfg)
         vg_cidr_to_str(&cfg->local_cidr[i], buf, sizeof(buf));
 
         if (lpm_update(fd, &cfg->local_cidr[i], &one) < 0) {
-            vg_warn("failed to add local %s: %s", buf, strerror(errno));
+            sw_log_warn("failed to add local %s: %s", buf, strerror(errno));
 
         } else {
-            vg_log("local network %s", buf);
+            sw_log_info("local network %s", buf);
         }
     }
 
@@ -1090,7 +1090,7 @@ vg_populate_allow(struct vg_maps *m, const struct vg_config *cfg)
         int fd = cfg->allow_cidr[i].family == AF_INET ? fd4 : fd6;
 
         if (lpm_update(fd, &cfg->allow_cidr[i], &one) < 0) {
-            vg_warn("failed to add allow prefix");
+            sw_log_warn("failed to add allow prefix");
         }
     }
 

@@ -53,7 +53,6 @@ fail() {
 write_conf() {
     cat > "$CONF" <<EOF
 interface = test0
-log_file = $LOG
 xdp_mode = skb
 wake_pps = 1000000000
 wake_mbps = 20
@@ -158,7 +157,8 @@ wait_log() {
 }
 
 start_vg() {
-    "$BIN" -c "$CONF" &
+    # in the foreground the log is stderr
+    "$BIN" -c "$CONF" 2>> "$LOG" &
     DAEMON_PID=$!
     for _ in $(seq 50); do
         "$CTL" status >/dev/null 2>&1 && return 0

@@ -94,14 +94,18 @@ PID to stderr. Startup failures return nonzero; after detachment, diagnostic
 details are in the log file. SIGTERM shuts down the daemon and detaches XDP.
 The supplied systemd service continues running in the foreground.
 
-`log_file` in the configuration selects the append-only log. Omit the key for
-`/var/log/voidgate.log`. Files are created with mode `0644` subject to
-the process umask; parent directories must already exist. `pid_file` is
-`/run/voidgate.pid` when omitted; `-s stop` reads it. Relative log, pid, and
-config paths use the launch directory, which the daemon retains for
-configuration reloads. `-v` and `-vv` retain their usual verbosity. Restart
-voidgate after rotating the log file or changing its destination; configuration
-reload does not reopen logs or move the pid file.
+In the foreground, and so under the systemd service, voidgate logs to
+stderr with libsw's `sw_log`: the journal, at each line's own priority
+(`journalctl -u voidgate -p warning` finds its warnings), or a terminal.
+With `-d` it has no stderr, and logs to `log_file` instead: omit the key
+for `/var/log/voidgate.log`. That file is created with mode `0644`
+subject to the process umask; parent directories must already exist.
+`pid_file` is `/run/voidgate.pid` when omitted; `-s stop` reads it.
+Relative log, pid, and config paths use the launch directory, which the
+daemon retains for configuration reloads. `-v` adds debug lines, `-vv`
+the per-source and idle-tick ones too. Restart voidgate after rotating
+the log file or changing its destination; configuration reload does not
+reopen logs or move the pid file.
 
 Only one daemon runs at a time. It holds a lock on the pid file for its whole
 life, and a second `voidgate` exits with `already running (pid N, <pid_file>)`

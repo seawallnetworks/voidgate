@@ -103,7 +103,7 @@ rx_pps=412 rx_bps=2800000 state=idle prefixes=0</span></pre>
 sudo ./voidgate -s stop</code></pre>
                 </div>
                 <ul>
-                    <li><strong>Logs</strong> go to <code>log_file</code> (default <code>/var/log/voidgate.log</code>), append-only. After detaching, check there for startup diagnostics. Restart after rotating the file.</li>
+                    <li><strong>Logs</strong> go to stderr in the foreground, so under the systemd service to the journal (<code>journalctl -u voidgate</code>), each line at its own priority. With <code>-d</code> they go to <code>log_file</code> (default <code>/var/log/voidgate.log</code>), append-only: after detaching, check there for startup diagnostics, and restart after rotating the file.</li>
                     <li><strong>Pid file</strong> is <code>pid_file</code> (default <code>/run/voidgate.pid</code>). The daemon holds a lock on it for its whole life, so a second <code>voidgate</code> exits with <code>already running</code> before it touches the NIC.</li>
                     <li><strong>After a crash</strong> the kernel releases the lock, and the next start takes over the leftover socket and XDP program. <code>-s stop</code> refuses a stale pid file and never signals the pid inside it.</li>
                     <li><code>-v</code> / <code>-vv</code> raise verbosity. Relative config, log and pid paths resolve against the launch directory.</li>

@@ -137,7 +137,7 @@ its comments.
 | `interface` | `eth0` | Public RX NIC to attach to. `-i` overrides. Never `lo`. | restart |
 | `xdp_mode` | `auto` | `auto` tries native driver XDP, then SKB. `native` / `skb` pin one. | restart |
 | `hook` | `auto` | `auto`: XDP, falling back to TC if a non-dispatcher program holds the hook. `xdp`: fail instead. `tc`: always TC. | restart |
-| `log_file` | `/var/log/voidgate.log` | Append-only log; the parent directory must exist. | restart |
+| `log_file` | `/var/log/voidgate.log` | Append-only log with `-d` only; in the foreground (the unit) the log is the journal. The parent directory must exist. | restart |
 | `pid_file` | `/run/voidgate.pid` | Locked for the daemon's life; `-s stop` reads it. | restart |
 | `wake_pps` | `2000` | Aggregate NIC packets/s that arms the gate. | reload |
 | `wake_mbps` | `25` | Aggregate NIC Mbit/s that arms the gate. Either one arms. | reload |
@@ -225,9 +225,8 @@ sudo voidgate -s stop
 ```
 
 The unit's hardening matters when you move files: `ProtectSystem=strict`
-allows writes only to `/sys/fs/bpf`, `/run` and `/var/log`. A `log_file`
-or `pid_file` elsewhere needs `ReadWritePaths=` added with
-`systemctl edit voidgate`.
+allows writes only to `/sys/fs/bpf` and `/run`. A `pid_file` elsewhere
+needs `ReadWritePaths=` added with `systemctl edit voidgate`.
 
 Only one daemon runs at a time. It locks the pid file for its whole life;
 a second one exits with `voidgate already running (pid N, <pid_file>)`
@@ -302,11 +301,14 @@ During an attack:
 
 ## 6. Logging and the OpenResty bridge
 
-voidgate writes to `log_file` (default `/var/log/voidgate.log`), opened
-append-only with mode `0644`. Each line is
-`<local time> voidgate [INFO|WARN|FATL] <message> at <file>:<line>`.
-Under systemd, early startup errors also reach the journal:
-`journalctl -u voidgate`.
+Under the unit voidgate logs to the journal, one entry a line at the
+line's own priority: `journalctl -u voidgate`, and
+`journalctl -u voidgate -p warning` for its warnings and errors alone.
+Run by hand in the foreground, it logs to stderr as
+`<local time> voidgate [LEVEL] <message>`, in colour on a terminal.
+Only with `-d` does it write to `log_file` (default
+`/var/log/voidgate.log`), opened append-only with mode `0644`, in the
+same format.
 
 Lines worth watching for:
 
@@ -321,10 +323,11 @@ Lines worth watching for:
 | `degraded: … holds ifindex N's XDP hook …` | Running at TC, not XDP |
 | `reloaded <path>` | A reload took effect |
 
-`-v` adds one `tick` line per poll and `-vv` one line per remote source;
-use them only while debugging, as they grow the log fast.
+`-v` adds debug lines, among them one `tick` line per poll while armed,
+and `-vv` one line per remote source and per idle poll; use them only
+while debugging, as they grow the log fast.
 
-Rotation: the file is opened with `O_APPEND`, so logrotate's
+Rotation, for `-d`'s file: it is opened with `O_APPEND`, so logrotate's
 `copytruncate` works without a restart. If you rotate by renaming,
 restart voidgate afterwards; a reload does not reopen the log. A minimal
 `/etc/logrotate.d/voidgate`:
@@ -374,7 +377,7 @@ restart.
 4. For `restart` keys: `sudo systemctl restart voidgate`, outside an
    attack.
 5. Confirm with `voidgatectl status` and
-   `grep reloaded /var/log/voidgate.log`.
+   `journalctl -u voidgate | grep reloaded`.
 
 **Upgrading**
 
@@ -412,8 +415,8 @@ restart.
 
 ## 8. Troubleshooting
 
-Start with `systemctl status voidgate`, `voidgatectl status` and the last
-lines of `/var/log/voidgate.log`; nearly every failure names itself
+Start with `systemctl status voidgate`, `voidgatectl status` and
+`journalctl -u voidgate -n 50`; nearly every failure names itself
 there.
 
 | Symptom or message | Cause | Fix |
@@ -455,7 +458,7 @@ with `-vv` on a test host, and use `bpftool prog show` and
 | `/etc/systemd/system/voidgate.service` | Unit |
 | `/run/voidgate.sock` | Control socket, `0660 root:voidgate` |
 | `/run/voidgate.pid` | Pid file, locked while running |
-| `/var/log/voidgate.log` | Log |
+| `/var/log/voidgate.log` | Log, with `-d` only; the unit's is the journal |
 | `/sys/fs/bpf` | bpffs, used by libxdp's dispatcher (`LIBXDP_BPFFS` overrides) |
 | `127.0.0.1:9105/metrics` | Prometheus |
 

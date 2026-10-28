@@ -150,7 +150,15 @@ runs the verdicts at TC (`make test` runs all three hooks), and
 
 ## Coding rules
 
-- C, no extra libraries beyond libbpf/libxdp/libelf/zlib. `-Wall -Wextra`.
+- C, no extra libraries beyond libbpf/libxdp/libelf/zlib and libsw.
+  `-Wall -Wextra`.
+- Logging, readiness and the config reader are libsw's (Seawall proposal
+  0011), from `$(LIBSW_PREFIX)` (default `/usr/local/seawall`; libsw's
+  `make install`): `sw_log_*`, never `printf` to stderr in the daemon.
+  `-v` is sw_log's debug level; `vg_vvlog()` the `-vv` lines. In the
+  foreground the log is stderr (the journal, under the unit);
+  `log_file` is `-d`'s alone. Keys, defaults and checks of the config
+  stay in `src/config.c`.
 - Formatting: [`code_style.md`](code_style.md) (nginx-based).
 - `src/bpf/voidgate.h` is included by BPF and userspace: keep types
   packed/`__u*`, no `stdio`, no pointers to userspace objects.

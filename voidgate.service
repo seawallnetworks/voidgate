@@ -6,7 +6,9 @@ After=network-online.target sw_flowd.service
 Wants=network-online.target sw_flowd.service
 
 [Service]
-Type=simple
+# ready once the control socket listens and the program is attached
+# (voidgate tells systemd), so a unit ordered after it finds both
+Type=notify
 # "+": as root, before the capabilities below are dropped. Makes the
 # config from the default on the first start, for this machine's
 # interface.
@@ -14,19 +16,20 @@ ExecStartPre=+/usr/local/seawall/libexec/voidgate-mkconf
 # -g voidgate: the control socket, /run/voidgate.sock, is 0660, group
 # voidgate (from the seawall repo): root and the group's members, such
 # as sw_configd, may connect, with the whole protocol. For root alone,
-# drop -g with "systemctl edit voidgate".
+# drop -g with "systemctl edit voidgate". In the foreground (no -d) it
+# logs to stderr, the journal; log_file is for -d.
 ExecStart=/usr/local/seawall/sbin/voidgate -c /usr/local/seawall/etc/voidgate/voidgate.conf -g voidgate
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN
 CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN CAP_DAC_OVERRIDE CAP_CHOWN
 LimitMEMLOCK=infinity
-# Hardening: root, but it writes only its pins, its socket and pid in /run
-# and its log in /var/log. A log_file or pid_file elsewhere wants that
-# directory here too ("systemctl edit voidgate").
+# Hardening: root, but it writes only its pins, and its socket and pid in
+# /run. A pid_file elsewhere wants that directory here too ("systemctl
+# edit voidgate").
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/sys/fs/bpf /run /var/log
+ReadWritePaths=/sys/fs/bpf /run
 ProtectHome=yes
 PrivateTmp=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK

@@ -17,7 +17,6 @@ trap cleanup EXIT
 
 cat > "$CONF" <<EOF
 interface = test0
-log_file = $work/voidgate.log
 xdp_mode = skb
 wake_pps = 50
 wake_mbps = 1000
@@ -43,7 +42,8 @@ ip netns exec "$NS" ip link set peer0 up
 ip netns exec "$NS" ip link set lo up
 ip netns exec "$NS" ping -c 1 -W 1 198.51.100.10 >/dev/null || true
 
-"$BIN" -c "$CONF" &
+# in the foreground the log is stderr
+"$BIN" -c "$CONF" 2> "$work/voidgate.log" &
 DAEMON_PID=$!
 for _ in $(seq 50); do
   "$CTL" status >/dev/null 2>&1 && break

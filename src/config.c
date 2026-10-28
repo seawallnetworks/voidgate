@@ -4,7 +4,8 @@
 #include "config.h"
 #include "log.h"
 
-#include <ctype.h>
+#include <sw/conf.h>
+
 #include <errno.h>
 #include <ifaddrs.h>
 #include <limits.h>
@@ -28,14 +29,23 @@ struct cfg_scalar {
 #define CFG_OFF(f)  offsetof(struct vg_config, f)
 
 
-static char *trim(char *s);
-static int parse_u64(const char *s, uint64_t *out);
-static int parse_int(const char *s, int *out);
+typedef struct {
+    struct vg_config  *c;
+    const char        *path;
+    int                lines;
+    int                local_seen;
+    int                allow_seen;
+} vg_conf_ctx_t;
+
+
 static int parse_csv_cidrs(char *val, struct vg_cidr *arr, int *count,
-    int max);
-static int parse_allow_ports(char *val, struct vg_config *c);
+    int max, char *err, size_t errlen);
+static int parse_allow_ports(const char *val, struct vg_config *c,
+    char *err, size_t errlen);
 static int apply_scalar(struct vg_config *c, const struct cfg_scalar *s,
     const char *val);
+static int conf_handler(void *ctx, const char *key, char *val, int line,
+    char *err, size_t errlen);
 static int local_cidr_from_nic(const char *nic, struct vg_cidr *out,
     int max);
 
@@ -99,82 +109,27 @@ vg_config_defaults(struct vg_config *c)
 }
 
 
-static char *
-trim(char *s)
-{
-    char *e;
-
-    while (*s && isspace((unsigned char)*s))
-        s++;
-    e = s + strlen(s);
-    while (e > s && isspace((unsigned char)e[-1]))
-        *--e = 0;
-
-    return s;
-}
-
-
+/* A list split by commas or spaces: a CIDR has neither. */
 static int
-parse_u64(const char *s, uint64_t *out)
+parse_csv_cidrs(char *val, struct vg_cidr *arr, int *count, int max,
+    char *err, size_t errlen)
 {
-    char *end = NULL;
-    unsigned long long v;
+    char  *tok, *save;
 
-    if (s == NULL || *s == '\0') {
-        return -1;
-    }
-
-    v = strtoull(s, &end, 10);
-
-    if (end == s || *end != 0) {
-        return -1;
-    }
-
-    *out = (uint64_t) v;
-
-    return 0;
-}
-
-
-static int
-parse_int(const char *s, int *out)
-{
-    uint64_t v;
-
-    if (parse_u64(s, &v) < 0 || v > (uint64_t) INT_MAX) {
-        return -1;
-    }
-
-    *out = (int) v;
-
-    return 0;
-}
-
-
-static int
-parse_csv_cidrs(char *val, struct vg_cidr *arr, int *count,
-    int max)
-{
-    char *save = NULL;
-    char *tok = strtok_r(val, ",", &save);
-
-    while (tok != NULL) {
-        tok = trim(tok);
-
-        if (*tok) {
-            if (*count >= max) {
-                return -1;
-            }
-
-            if (vg_parse_cidr(tok, &arr[*count]) < 0) {
-                vg_warn("bad CIDR '%s'", tok);
-                return -1;
-            }
-
-            (*count)++;
+    for (tok = strtok_r(val, ", \t", &save); tok != NULL;
+         tok = strtok_r(NULL, ", \t", &save))
+    {
+        if (*count >= max) {
+            snprintf(err, errlen, "more than %d prefixes", max);
+            return -1;
         }
 
-        tok = strtok_r(NULL, ",", &save);
+        if (vg_parse_cidr(tok, &arr[*count]) < 0) {
+            snprintf(err, errlen, "bad CIDR '%s'", tok);
+            return -1;
+        }
+
+        (*count)++;
     }
 
     return 0;
@@ -182,33 +137,35 @@ parse_csv_cidrs(char *val, struct vg_cidr *arr, int *count,
 
 
 static int
-parse_allow_ports(char *val, struct vg_config *c)
+parse_allow_ports(const char *val, struct vg_config *c, char *err,
+    size_t errlen)
 {
-    char *save = NULL;
-    char *tok = strtok_r(val, ",", &save);
+    int          rc;
+    unsigned     lo, hi;
+    const char  *s;
 
     c->allow_port_count = 0;
-    while (tok != NULL) {
-        uint64_t v;
 
-        tok = trim(tok);
-
-        if (*tok) {
-            if (c->allow_port_count >= VG_MAX_ALLOW_PORTS) {
-                vg_warn("allow_ports: more than %d entries",
-                        VG_MAX_ALLOW_PORTS);
-                return -1;
-            }
-
-            if (parse_u64(tok, &v) < 0 || v < 1 || v > 65535) {
-                vg_warn("bad allow port '%s'", tok);
-                return -1;
-            }
-
-            c->allow_ports[c->allow_port_count++] = (uint16_t) v;
+    for (s = val; (rc = sw_conf_next_port(&s, &lo, &hi)) > 0; /* void */ ) {
+        if (lo != hi) {
+            snprintf(err, errlen, "allow_ports: %u-%u: ports, not a range",
+                     lo, hi);
+            return -1;
         }
 
-        tok = strtok_r(NULL, ",", &save);
+        if (c->allow_port_count >= VG_MAX_ALLOW_PORTS) {
+            snprintf(err, errlen, "allow_ports: more than %d entries",
+                     VG_MAX_ALLOW_PORTS);
+            return -1;
+        }
+
+        c->allow_ports[c->allow_port_count++] = (uint16_t) lo;
+    }
+
+    if (rc < 0) {
+        snprintf(err, errlen, "allow_ports: %s: not a list of ports 1 to "
+                 "65535", val);
+        return -1;
     }
 
     return 0;
@@ -219,6 +176,8 @@ static int
 apply_scalar(struct vg_config *c, const struct cfg_scalar *s,
     const char *val)
 {
+    unsigned long long  v;
+
     switch (s->kind) {
     case CFG_STR:
         if (s->sz == 0 || *val == '\0' || strlen(val) >= s->sz) {
@@ -227,50 +186,101 @@ apply_scalar(struct vg_config *c, const struct cfg_scalar *s,
 
         snprintf((char *) c + s->off, s->sz, "%s", val);
         return 0;
-    case CFG_U64: {
-        uint64_t v;
-
-        if (parse_u64(val, &v) < 0) {
+    case CFG_U64:
+        if (sw_conf_uint(val, 0, UINT64_MAX, &v) < 0) {
             return -1;
         }
 
-        *(uint64_t *) ((char *) c + s->off) = v;
+        *(uint64_t *) ((char *) c + s->off) = (uint64_t) v;
         return 0;
-    }
-    case CFG_I32: {
-        int v;
-
-        if (parse_int(val, &v) < 0) {
+    case CFG_I32:
+        if (sw_conf_uint(val, 0, INT_MAX, &v) < 0) {
             return -1;
         }
 
-        *(int *) ((char *) c + s->off) = v;
+        *(int *) ((char *) c + s->off) = (int) v;
         return 0;
-    }
-    case CFG_U32: {
-        uint64_t v;
-
-        if (parse_u64(val, &v) < 0 || v > 0xffffffffULL) {
+    case CFG_U32:
+        if (sw_conf_uint(val, 0, UINT32_MAX, &v) < 0) {
             return -1;
         }
 
         *(uint32_t *) ((char *) c + s->off) = (uint32_t) v;
         return 0;
     }
-    }
 
     return -1;
+}
+
+
+static int
+conf_handler(void *ctx, const char *key, char *val, int line, char *err,
+    size_t errlen)
+{
+    size_t          i;
+    vg_conf_ctx_t  *x;
+
+    x = ctx;
+    x->lines++;
+
+    for (i = 0; i < sizeof(scalars) / sizeof(scalars[0]); i++) {
+        if (strcmp(key, scalars[i].key) == 0) {
+            /* no message: sw_conf_read() says "bad value for <key>" */
+            return apply_scalar(x->c, &scalars[i], val);
+        }
+    }
+
+    if (strcmp(key, "allow_ports") == 0) {
+        return parse_allow_ports(val, x->c, err, errlen);
+    }
+
+    if (strcmp(key, "local_networks") == 0) {
+        if (*val == '\0') {
+            return 0;
+        }
+
+        x->c->auto_local = 0;
+
+        if (!x->local_seen) {
+            x->c->local_cidr_count = 0;
+            x->local_seen = 1;
+        }
+
+        return parse_csv_cidrs(val, x->c->local_cidr,
+                               &x->c->local_cidr_count, VG_MAX_CIDR_LIST,
+                               err, errlen);
+    }
+
+    if (strcmp(key, "allow_networks") == 0) {
+        if (*val == '\0') {
+            return 0;
+        }
+
+        /* The first list replaces the built-in one; later lines add
+         * to it, so a second line cannot drop the first.
+         */
+        if (!x->allow_seen) {
+            x->c->allow_cidr_count = 0;
+            x->allow_seen = 1;
+        }
+
+        return parse_csv_cidrs(val, x->c->allow_cidr,
+                               &x->c->allow_cidr_count, VG_MAX_CIDR_LIST,
+                               err, errlen);
+    }
+
+    /* a newer voidgate's key: the rest of the file still applies */
+    sw_log_warn("%s:%d: unknown key '%s'", x->path, line, key);
+
+    return 0;
 }
 
 
 int
 vg_config_load(const char *path, struct vg_config *c)
 {
-    FILE *fp;
-    char *line = NULL;
-    size_t cap = 0;
-    int lineno = 0;
-    int local_seen = 0, allow_seen = 0;
+    vg_conf_ctx_t  x;
+    char           err[PATH_MAX + SW_CONF_ERR_LEN];
 
     vg_config_defaults(c);
 
@@ -278,109 +288,22 @@ vg_config_load(const char *path, struct vg_config *c)
         return 0;
     }
 
-    fp = fopen(path, "r");
+    memset(&x, 0, sizeof(x));
+    x.c = c;
+    x.path = path;
 
-    if (fp == NULL) {
-        vg_warn("config %s not found, using defaults", path);
-        return 0;
+    errno = 0;
+
+    if (sw_conf_read(path, conf_handler, &x, err, sizeof(err)) != 0) {
+        /* no line read: the errno is fopen()'s, which sw_conf_read() keeps */
+        if (x.lines == 0 && errno == ENOENT) {
+            sw_log_warn("config %s not found, using defaults", path);
+            return 0;
+        }
+
+        sw_log_warn("%s", err);
+        return -1;
     }
-
-    /* getline, not a fixed buffer: a CSV list (up to VG_MAX_CIDR_LIST
-     * entries) split mid-token would parse the pieces as other prefixes.
-     */
-    while (getline(&line, &cap, fp) != -1) {
-        char *eq, *key, *val;
-        size_t i;
-        int found = 0;
-
-        lineno++;
-
-        if (line[0] == '#' || line[0] == '\n' || line[0] == 0) {
-            continue;
-        }
-
-        eq = strchr(line, '=');
-
-        if (eq == NULL) {
-            continue;
-        }
-
-        *eq = 0;
-        key = trim(line);
-        val = trim(eq + 1);
-
-        if (*key == '\0') {
-            continue;
-        }
-
-        for (i = 0; i < sizeof(scalars) / sizeof(scalars[0]); i++) {
-            if (strcmp(key, scalars[i].key) != 0) {
-                continue;
-            }
-
-            if (apply_scalar(c, &scalars[i], val) < 0) {
-                vg_warn("%s:%d: bad value for %s", path, lineno, key);
-                goto fail;
-            }
-
-            found = 1;
-            break;
-        }
-
-        if (found) {
-            continue;
-        }
-
-        if (strcmp(key, "allow_ports") == 0) {
-            if (parse_allow_ports(val, c) < 0) {
-                goto fail;
-            }
-
-        } else if (strcmp(key, "local_networks") == 0) {
-            if (*val) {
-                c->auto_local = 0;
-
-                if (!local_seen) {
-                    c->local_cidr_count = 0;
-                    local_seen = 1;
-                }
-
-                if (parse_csv_cidrs(val, c->local_cidr, &c->local_cidr_count,
-                                    VG_MAX_CIDR_LIST) < 0)
-                {
-                    goto fail;
-                }
-            }
-
-        } else if (strcmp(key, "allow_networks") == 0) {
-            /* The first list replaces the built-in one; later lines add
-             * to it, so a second line cannot drop the first.
-             */
-            if (*val) {
-                if (!allow_seen) {
-                    c->allow_cidr_count = 0;
-                    allow_seen = 1;
-                }
-
-                if (parse_csv_cidrs(val, c->allow_cidr, &c->allow_cidr_count,
-                                    VG_MAX_CIDR_LIST) < 0)
-                {
-                    goto fail;
-                }
-            }
-
-        } else {
-            vg_warn("%s:%d: unknown key '%s'", path, lineno, key);
-        }
-    }
-
-    if (ferror(fp)) {
-        vg_warn("%s: read error: %s", path, strerror(errno));
-        goto fail;
-    }
-
-    free(line);
-    fclose(fp);
 
     if (c->idle_poll_ms <= 0) {
         c->idle_poll_ms = 1000;
@@ -391,12 +314,6 @@ vg_config_load(const char *path, struct vg_config *c)
     }
 
     return 0;
-
-fail:
-    free(line);
-    fclose(fp);
-
-    return -1;
 }
 
 
@@ -410,7 +327,7 @@ local_cidr_from_nic(const char *nic, struct vg_cidr *out, int max)
     int n = 0;
 
     if (getifaddrs(&ifa) < 0) {
-        vg_warn("getifaddrs failed: %s", strerror(errno));
+        sw_log_warn("getifaddrs failed: %s", strerror(errno));
         return -1;
     }
 
