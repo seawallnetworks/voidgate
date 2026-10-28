@@ -351,6 +351,11 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
 void
 vg_detach(struct vg_maps *m)
 {
+    const char *name;
+
+    /* before the detach: a closed tcx link would read as classic TC */
+    name = vg_hook_name(m);
+
     if (m->hook == VG_HOOK_XDP) {
         xdp_program__detach(m->xdp_prog, m->ifindex, m->xdp_mode, 0);
         xdp_program__close(m->xdp_prog);
@@ -369,7 +374,7 @@ vg_detach(struct vg_maps *m)
         return;
     }
 
-    sw_log_info("detached %s from ifindex %d", vg_hook_name(m), m->ifindex);
+    sw_log_info("detached %s from ifindex %d", name, m->ifindex);
     m->hook = VG_HOOK_NONE;
 }
 

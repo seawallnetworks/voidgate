@@ -145,6 +145,9 @@ grep -q 'degraded: customer holds' "$work/log/voidgate.log"
 stop_daemon
 [[ $(xdp_id) == "$customer" ]]
 [[ $(bpftool net show dev test0) != *voidgate_tc* ]]
+# the hook it left, named as it was, not as the closed link reads
+grep -q 'detached tcx from ifindex' "$work/log/voidgate.log"
+[[ $(< "$work/log/voidgate.log") != *'detached tc from ifindex'* ]]
 
 # Classic TC on a kernel without tcx.
 SW_NO_TCX=1 start_daemon -c base.conf
@@ -152,6 +155,7 @@ SW_NO_TCX=1 start_daemon -c base.conf
 [[ $(tc_filter) == 1 ]]
 stop_daemon
 [[ $(tc_filter) == 0 ]]
+grep -q 'detached tc from ifindex' "$work/log/voidgate.log"
 
 # hook = xdp will not fall back.
 cp base.conf xdp.conf
