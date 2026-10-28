@@ -214,7 +214,7 @@ Command-line options of `voidgate`:
 | `-g <group>` | Give `/run/voidgate.sock` (mode `0660`) to this group. Takes effect at start; a group missing from `/etc/group` stops the start. |
 | `-d` | Detach. Waits for startup, prints the daemon PID to stderr, and exits nonzero if startup fails. |
 | `-s stop` | Send SIGTERM to the daemon in `pid_file` and wait for it. |
-| `-v`, `-vv` | Log every tick; `-vv` also logs each remote source. |
+| `-v`, `-vv` | Debug lines: every tick while armed, each drop and expiry, libbpf's and libxdp's info; `-vv` also each remote source and idle tick. |
 | `-h` | Usage. |
 
 Outside systemd, for a test host:

@@ -100,7 +100,7 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
 
 `make test` runs `t/unit/policy` and `t/unit/cidr`, then `sudo t/bin/run` three times:
-at XDP, at tcx (`VG_HOOK=tc`) and at classic TC (`VG_HOOK=tc VG_NO_TCX=1`). The integration
+at XDP, at tcx (`VG_HOOK=tc`) and at classic TC (`VG_HOOK=tc SW_NO_TCX=1`). The integration
 scripts run separately, each with sudo:
 
 ```sh

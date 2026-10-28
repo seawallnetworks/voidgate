@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Run the Perl Test::Base suite (t/*.t) against a real daemon in private
 # namespaces. Extra arguments go to prove, e.g. -v t/v4.t. VG_HOOK=tc
-# judges at TC ingress instead of XDP (VG_NO_TCX=1: classic TC).
+# judges at TC ingress instead of XDP (SW_NO_TCX=1, the stack's switch: classic TC).
 # Usage: sudo t/bin/run [prove args]
 set -euo pipefail
 

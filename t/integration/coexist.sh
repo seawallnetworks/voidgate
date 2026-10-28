@@ -147,7 +147,7 @@ stop_daemon
 [[ $(bpftool net show dev test0) != *voidgate_tc* ]]
 
 # Classic TC on a kernel without tcx.
-VG_NO_TCX=1 start_daemon -c base.conf
+SW_NO_TCX=1 start_daemon -c base.conf
 [[ $(status) == *' hook=tc degraded=1' ]]
 [[ $(tc_filter) == 1 ]]
 stop_daemon
@@ -177,7 +177,7 @@ stop_daemon
 # whichever hook the next one takes.
 cp base.conf tc.conf
 printf 'hook = tc\n' >> tc.conf
-VG_NO_TCX=1 start_daemon -c tc.conf
+SW_NO_TCX=1 start_daemon -c tc.conf
 kill_daemon
 [[ $(tc_filter) == 1 ]]
 start_daemon -c base.conf

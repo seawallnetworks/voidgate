@@ -159,6 +159,11 @@ runs the verdicts at TC (`make test` runs all three hooks), and
   foreground the log is stderr (the journal, under the unit);
   `log_file` is `-d`'s alone. Keys, defaults and checks of the config
   stay in `src/config.c`.
+- libsw's too: the control socket (`sw_sock_*`), libxdp's bpffs check,
+  tcx, libbpf's and libxdp's messages (`libsw_bpf.a`, linked before
+  `libsw.a`) and interface lookups: `sw_netif_index()`, whose -1 (can't
+  tell) is never "gone". `SW_NO_TCX=1` takes classic TC on a kernel
+  with tcx, for the whole stack.
 - Formatting: [`code_style.md`](code_style.md) (nginx-based).
 - `src/bpf/voidgate.h` is included by BPF and userspace: keep types
   packed/`__u*`, no `stdio`, no pointers to userspace objects.

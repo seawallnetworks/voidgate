@@ -6,18 +6,19 @@
 
 #include "bpf/voidgate.skel.h"
 
+#include <sw/bpf.h>
+#include <sw/bpffs.h>
+#include <sw/netif.h>
+
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <xdp/libxdp.h>
 #include <errno.h>
-#include <stdarg.h>
 #include <linux/if_link.h>
-#include <linux/magic.h>
 #include <net/if.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
-#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <sw_flowd/sw_flowd.h>
@@ -45,19 +46,9 @@
 #define VG_XDP_SHARED  2    /* libxdp's dispatcher */
 
 
-/* set around a call that may fail, harmlessly: libbpf keeps quiet */
-static int libbpf_quiet;
-
 static void bump_memlock(void);
-static int libbpf_print(enum libbpf_print_level level, const char *fmt,
-    va_list args);
-static int libxdp_print(enum libxdp_print_level level, const char *fmt,
-    va_list args);
 static int skel_open(struct vg_maps *m, const struct vg_config *cfg);
 static int skel_fresh(struct vg_maps *m, const struct vg_config *cfg);
-static const char *bpffs_dir(void);
-static int bpffs_mounted(void);
-static int have_tcx(void);
 static int xdp_claim(int ifindex, char *holder, size_t len,
     enum xdp_attach_mode *mode);
 static int attach_xdp(struct vg_maps *m, const struct vg_config *cfg,
@@ -83,41 +74,6 @@ bump_memlock(void)
 }
 
 
-static int
-libbpf_print(enum libbpf_print_level level, const char *fmt,
-    va_list args)
-{
-    enum libbpf_print_level max_level =
-        vg_verbose >= 2 ? LIBBPF_INFO : LIBBPF_WARN;
-
-    if (level > max_level || libbpf_quiet) {
-        return 0;
-    }
-
-    /* the sections of libxdp's objects that libxdp reads itself */
-    if (strstr(fmt, "skipping unrecognized data section") != NULL) {
-        return 0;
-    }
-
-    return vfprintf(stderr, fmt, args);
-}
-
-
-static int
-libxdp_print(enum libxdp_print_level level, const char *fmt,
-    va_list args)
-{
-    enum libxdp_print_level max_level =
-        vg_verbose >= 2 ? LIBXDP_INFO : LIBXDP_WARN;
-
-    if (level > max_level) {
-        return 0;
-    }
-
-    return vfprintf(stderr, fmt, args);
-}
-
-
 static size_t
 sum_scratch_need(int ncpus)
 {
@@ -137,17 +93,29 @@ sum_scratch_need(int ncpus)
 int
 vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
 {
+    char err[256];
+
     memset(m, 0, sizeof(*m));
 
-    m->ifindex = (int) if_nametoindex(cfg->interface);
+    m->ifindex = sw_netif_index(cfg->interface, err, sizeof(err));
+
+    if (m->ifindex <= 0) {
+        if (m->ifindex == 0) {
+            snprintf(err, sizeof(err), "no interface %s", cfg->interface);
+        }
+
+        sw_log_warn("%s", err);
+        return -1;
+    }
+
     m->tcx_fd = -1;
     m->flows_fd = -1;
     m->flows_config_fd = -1;
     m->flows_stats_fd = -1;
 
     bump_memlock();
-    libbpf_set_print(libbpf_print);
-    libxdp_set_print(libxdp_print);
+    sw_bpf_log_init();
+    sw_bpf_libxdp_log_init();
 
     m->ncpus = libbpf_num_possible_cpus();
 
@@ -320,9 +288,9 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
     /* Without bpffs libxdp attaches the program alone, not in a
      * dispatcher, and every program after it finds the hook held.
      */
-    if (!bpffs_mounted()) {
+    if (!sw_bpffs_mounted(sw_bpffs_libxdp_dir())) {
         sw_log_warn("XDP attach: no bpffs at %s, which libxdp needs to share "
-                    "the hook", bpffs_dir());
+                    "the hook", sw_bpffs_libxdp_dir());
         return -1;
     }
 
@@ -418,40 +386,6 @@ vg_hook_name(const struct vg_maps *m)
     default:
         return "none";
     }
-}
-
-
-static const char *
-bpffs_dir(void)
-{
-    const char *dir = getenv("LIBXDP_BPFFS");
-
-    return dir != NULL ? dir : "/sys/fs/bpf";
-}
-
-
-static int
-bpffs_mounted(void)
-{
-    struct statfs st;
-
-    return statfs(bpffs_dir(), &st) == 0 && st.f_type == BPF_FS_MAGIC;
-}
-
-
-/* tcx (6.6+): a kernel without it refuses to query it. VG_NO_TCX=1 takes
- * classic TC anyway, to test it on a newer kernel.
- */
-static int
-have_tcx(void)
-{
-    LIBBPF_OPTS(bpf_prog_query_opts, q);
-
-    if (getenv("VG_NO_TCX") != NULL) {
-        return 0;
-    }
-
-    return bpf_prog_query_opts(1 /* lo */, BPF_TCX_INGRESS, &q) == 0;
 }
 
 
@@ -624,7 +558,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
 
     prog_fd = bpf_program__fd(m->skel->progs.voidgate_tc);
 
-    if (have_tcx()) {
+    if (sw_bpf_have_tcx()) {
         /* first: ahead of mini-fw, which appends */
         fd = bpf_link_create(prog_fd, m->ifindex, BPF_TCX_INGRESS, &lopts);
 
@@ -672,9 +606,9 @@ tc_detach(int ifindex)
     LIBBPF_OPTS(bpf_tc_opts, opts, .handle = VG_TC_HANDLE,
                 .priority = VG_TC_PRIORITY);
 
-    libbpf_quiet = 1;
+    sw_bpf_quiet(1);
     bpf_tc_detach(&hook, &opts);
-    libbpf_quiet = 0;
+    sw_bpf_quiet(0);
 }
 
 

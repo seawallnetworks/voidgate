@@ -15,10 +15,14 @@ SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
 LIBPKT_PREFIX ?= $(PREFIX)
 LIBPKT_H := $(LIBPKT_PREFIX)/include/libpkt/parse.h
 # libsw, the stack's userspace library (Seawall proposal 0011): logging,
-# readiness, the config reader and the control socket, linked in by path,
-# as libbpf.a
+# readiness, the config reader, the control socket, bpffs and interface
+# lookups; libsw_bpf.a, tcx and libbpf's and libxdp's messages. Linked in
+# by path, as libbpf.a
 LIBSW_PREFIX ?= $(PREFIX)
 LIBSW_A := $(LIBSW_PREFIX)/lib/libsw.a
+# libbpf's and libxdp's helpers, linked before libsw.a, which they log
+# through
+LIBSW_BPF_A := $(LIBSW_PREFIX)/lib/libsw_bpf.a
 # The stack's OpenResty's site lualib; another OpenResty, Kong / APISIX:
 # point at their Lua path.
 LUA_DIR ?= $(PREFIX)/openresty/site/lualib
@@ -69,12 +73,12 @@ $(LIBPKT_H):
 		"(make -C ../libpkt install), or set LIBPKT_PREFIX" >&2
 	@exit 1
 
-$(LIBSW_A):
+$(LIBSW_A) $(LIBSW_BPF_A):
 	@echo "$@ missing: install libsw first" \
 		"(make -C ../libsw install), or set LIBSW_PREFIX" >&2
 	@exit 1
 
-$(USER_OBJS) $(CTL_OBJS): | $(LIBSW_A)
+$(USER_OBJS) $(CTL_OBJS): | $(LIBSW_A) $(LIBSW_BPF_A)
 
 $(BPFDIR)/voidgate.skel.h: $(BPFDIR)/voidgate.bpf.o
 	$(BPFTOOL) gen skeleton $< > $@
@@ -85,8 +89,8 @@ src/voidgate.o src/maps.o src/policy.o: \
 src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-voidgate: $(USER_OBJS) $(LIBSW_A)
-	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_A) $(LDFLAGS)
+voidgate: $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A) $(LDFLAGS)
 
 voidgatectl: $(CTL_OBJS) $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS) $(LIBSW_A)
@@ -109,7 +113,7 @@ test: all
 	./t/unit/cidr
 	sudo t/bin/run
 	sudo VG_HOOK=tc t/bin/run
-	sudo VG_HOOK=tc VG_NO_TCX=1 t/bin/run
+	sudo VG_HOOK=tc SW_NO_TCX=1 t/bin/run
 
 clean:
 	rm -f voidgate voidgatectl t/unit/policy t/unit/cidr t/unit/*.d \

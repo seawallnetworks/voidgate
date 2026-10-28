@@ -8,13 +8,13 @@
 #include "log.h"
 #include "maps.h"
 
+#include <sw/netif.h>
 #include <sw/notify.h>
 #include <sw/sock.h>
 
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
-#include <net/if.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -380,8 +380,13 @@ main(int argc, char **argv)
         snprintf(cfg.interface, sizeof(cfg.interface), "%s", iface_ov);
     }
 
-    if (if_nametoindex(cfg.interface) == 0) {
+    switch (sw_netif_index(cfg.interface, err, sizeof(err))) {
+    case 0:
         sw_log_fatal("unknown interface %s", cfg.interface);
+    case -1:
+        sw_log_fatal("%s", err);
+    default:
+        break;
     }
 
     if (vg_config_auto_local(&cfg) < 0) {
