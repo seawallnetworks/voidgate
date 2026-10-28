@@ -195,8 +195,8 @@ Check the real group with `ps -eo user,group,args | grep 'worker process'`.
 If the gateway runs in a container with the socket bind-mounted, the
 container's worker must have the same numeric gid as the group on the host.
 Members of that group get the whole protocol, `disarm` and `reload`
-included. An unknown group only logs a warning and leaves the socket
-root-only.
+included. A group missing from `/etc/group`, or a failed chown, stops the
+start before voidgate touches the NIC.
 
 ### Banning from a request
 

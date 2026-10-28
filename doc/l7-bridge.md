@@ -416,8 +416,10 @@ Check the real user and group with `ps -eo user,group,args | grep 'worker proces
 In a container with the socket bind-mounted, the worker's numeric gid must
 match the host group's.
 
-- An unknown group, or a failed chown, logs a warning and leaves the
-  socket root-only. It never stops the gate from starting.
+- A group missing from `/etc/group`, or a failed chown, stops the start
+  before the NIC is touched: a gate whose socket the gateway can't reach
+  would look up and refuse every ban. The socket is made `0600` and
+  opened to the group only then, whatever the umask.
 - Applied at startup; `reload` leaves the socket as it is.
 - The systemd unit's capability bounding set gains `CAP_CHOWN`.
 
@@ -525,7 +527,7 @@ For anyone upgrading:
 | `t/unit/cidr.c` | `vg_parse_cidr_len`: a word of a longer line, NUL inside the length, over-long input |
 | `t/drop-ttl.t` | protocol parsing: v4 and v6, refusal, ttl bounds and digits-only, CIDR-first errors |
 | `t/drop-ttl-xdp.t` | a timed drop really drops at XDP; SSH still passes |
-| `t/integration/daemon.sh` | `-g` chown, kept on reload, unknown group only warns; `voidgatectl` exits 1 on error |
+| `t/integration/daemon.sh` | `-g` chown, kept on reload, unknown group stops the start; `voidgatectl` exits 1 on error |
 | `t/integration/resty.sh` + `resty.lua` | real nginx with workers as `nobody:nogroup`: every method against a real daemon, ttl required and validated, reload; `ban_now()` answers and local rejects; `ban()` from the log phase, 50 requests send exactly one ban; `ban_now()` from the log phase returns an error instead of aborting the handler |
 
 Negative checks in the shell tests use a `refute` helper: under `set -e`,

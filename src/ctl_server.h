@@ -4,12 +4,14 @@
 #ifndef _VG_CTL_SERVER_H_INCLUDED_
 #define _VG_CTL_SERVER_H_INCLUDED_
 
+#include <stddef.h>
+
+
 struct vg_ctrl;
 
 
-/* 1 if a live daemon accepts connections on path, else 0. */
-int vg_ctl_server_alive(const char *path);
-int vg_ctl_server_listen(const char *path, const char *group);
+int vg_ctl_server_listen(const char *path, const char *group, char *err,
+    size_t errlen);
 /* The caller sets socket timeouts and closes fd after handling. */
 void vg_ctl_server_handle(struct vg_ctrl *ctrl, int fd);
 

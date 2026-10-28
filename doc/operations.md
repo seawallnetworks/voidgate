@@ -211,7 +211,7 @@ Command-line options of `voidgate`:
 | --- | --- |
 | `-c <config>` | Config file. Relative paths use the launch directory, which the daemon keeps for reloads. |
 | `-i <iface>` | Override `interface`. |
-| `-g <group>` | Give `/run/voidgate.sock` (mode `0660`) to this group. Takes effect at start; an unknown group only warns and leaves the socket root-only. |
+| `-g <group>` | Give `/run/voidgate.sock` (mode `0660`) to this group. Takes effect at start; a group missing from `/etc/group` stops the start. |
 | `-d` | Detach. Waits for startup, prints the daemon PID to stderr, and exits nonzero if startup fails. |
 | `-s stop` | Send SIGTERM to the daemon in `pid_file` and wait for it. |
 | `-v`, `-vv` | Log every tick; `-vv` also logs each remote source. |
@@ -431,8 +431,9 @@ there.
 | `degraded=1`, `hook=tc` or `tcx` | A non-libxdp program holds the XDP hook (`ip link`, Cilium) | Move that program to libxdp, or accept TC; `hook = xdp` makes this fatal instead |
 | `XDP attach: no bpffs at /sys/fs/bpf` | bpffs not mounted | `mount -t bpf bpf /sys/fs/bpf` |
 | `voidgatectl: connect /run/voidgate.sock: Permission denied` | Caller not root and not in group `voidgate` | `usermod -aG voidgate <user>`, then restart that service |
-| `voidgatectl: connect …: No such file or directory` | Daemon down, or `ctl socket … failed` at start | Start voidgate; read the log |
-| `-g voidgate: no such group` | seawall not installed | Install seawall; until then the socket is root-only |
+| `voidgatectl: connect …: No such file or directory` | Daemon down | Start voidgate; read the log |
+| `voidgatectl: connect …: timed out` | voidgate stopped answering (5 s) | `systemctl status voidgate`; read the log |
+| `control socket /run/voidgate.sock: no group "voidgate" in /etc/group` | seawall not installed | Install seawall, or drop `-g voidgate` with `systemctl edit voidgate` |
 | `error: refused or map update failed` on `drop` | The prefix covers `local_*` or `allow_*`, or the drop map is full | Narrow the prefix; check `drops` count against `drop_map_size` |
 | `error: reload failed` | Bad value in the config | Fix the line the log names; the old config keeps running |
 | Gate stays armed after the flood | A drop is still installed (manual drops never expire) | `voidgatectl drops`; `undrop` or `disarm` |

@@ -15,7 +15,8 @@ SW_FLOWD_H := $(SW_FLOWD_PREFIX)/include/sw_flowd/sw_flowd.h
 LIBPKT_PREFIX ?= $(PREFIX)
 LIBPKT_H := $(LIBPKT_PREFIX)/include/libpkt/parse.h
 # libsw, the stack's userspace library (Seawall proposal 0011): logging,
-# readiness and the config reader, linked in by path, as libbpf.a
+# readiness, the config reader and the control socket, linked in by path,
+# as libbpf.a
 LIBSW_PREFIX ?= $(PREFIX)
 LIBSW_A := $(LIBSW_PREFIX)/lib/libsw.a
 # The stack's OpenResty's site lualib; another OpenResty, Kong / APISIX:
@@ -87,8 +88,8 @@ src/%.o: src/%.c
 voidgate: $(USER_OBJS) $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_A) $(LDFLAGS)
 
-voidgatectl: $(CTL_OBJS)
-	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS)
+voidgatectl: $(CTL_OBJS) $(LIBSW_A)
+	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS) $(LIBSW_A)
 
 t/unit/policy: t/unit/policy.c src/policy.c src/policy.h \
 	src/log.h src/config.h src/maps.h src/ipaddr.h \

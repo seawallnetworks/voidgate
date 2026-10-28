@@ -115,7 +115,7 @@ grep -q 'reload: undrop 192.0.2.0/24' "$work/log/voidgate.log"
 stop_daemon
 
 # -g hands the control socket to that group; reload keeps it.
-# An unknown group leaves it root-only and only warns.
+# An unknown group stops the start.
 start_daemon -c base.conf -g nogroup
 [[ $(stat -c '%a %G' /run/voidgate.sock) == '660 nogroup' ]]
 [[ $("$root/voidgatectl" drop 198.18.0.1/32 ttl=60) == ok ]]
@@ -128,10 +128,13 @@ result=0
 [[ $result == 1 && $(< refused.out) == 'error: refused or map update failed' ]]
 "$root/voidgatectl" undrop 198.18.0.1/32 > /dev/null
 stop_daemon
-start_daemon -c base.conf -g no-such-voidgate-group
+# Before the fork: the caller sees why, and nothing is left behind.
+expect_failure "$root/voidgate" -d -c base.conf -g no-such-voidgate-group
+grep -q 'no group "no-such-voidgate-group" in /etc/group' failure.err
+[[ ! -e /run/voidgate.pid ]]
+# Without -g the socket is root's alone.
+start_daemon -c base.conf
 [[ $(stat -c '%a %G' /run/voidgate.sock) == '660 root' ]]
-grep -q -- '-g no-such-voidgate-group: no such group' \
-    "$work/log/voidgate.log"
 stop_daemon
 
 # Append mode preserves existing contents.

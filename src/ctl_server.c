@@ -7,13 +7,11 @@
 #include "maps.h"
 #include "policy.h"
 
+#include <sw/sock.h>
+
 #include <errno.h>
-#include <grp.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -342,77 +340,15 @@ ctl_reload(struct vg_ctrl *ctrl, const char *args, char *reply,
 }
 
 
-int
-vg_ctl_server_alive(const char *path)
-{
-    struct sockaddr_un addr;
-    int fd, alive;
-
-    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-
-    if (fd < 0) {
-        return 0;
-    }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
-
-    /* A leftover socket file from a crash refuses; a daemon accepts. */
-    alive = connect(fd, (struct sockaddr *) &addr, sizeof(addr)) == 0;
-    close(fd);
-
-    return alive;
-}
-
-
-/* group (-g): "" leaves the socket root-only; otherwise members of that
- * group (sw_configd, an nginx/OpenResty worker user) get the full control
- * protocol.
+/* group (-g): NULL leaves the socket to root alone; otherwise members of
+ * that group (sw_configd, an nginx/OpenResty worker user) get the full
+ * control protocol. One that /etc/group doesn't know is an error.
  */
 int
-vg_ctl_server_listen(const char *path, const char *group)
+vg_ctl_server_listen(const char *path, const char *group, char *err,
+    size_t errlen)
 {
-    struct group *gr;
-    struct sockaddr_un addr;
-    int fd;
-
-    unlink(path);
-    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-
-    if (fd < 0) {
-        return -1;
-    }
-
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
-
-    if (bind(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-        close(fd);
-        return -1;
-    }
-
-    chmod(path, 0660);
-
-    if (group[0] != '\0') {
-        gr = getgrnam(group);
-
-        if (gr == NULL) {
-            sw_log_warn("-g %s: no such group", group);
-
-        } else if (chown(path, (uid_t) -1, gr->gr_gid) < 0) {
-            sw_log_warn("-g %s: chown %s: %s", group, path,
-                        strerror(errno));
-        }
-    }
-
-    if (listen(fd, 16) < 0) {
-        close(fd);
-        return -1;
-    }
-
-    return fd;
+    return sw_sock_listen(path, 0660, group, err, errlen);
 }
 
 
@@ -484,20 +420,5 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd)
 
 send_reply:
 
-    len = strlen(reply);
-    used = 0;
-
-    while (used < len) {
-        n = send(cfd, reply + used, len - used, MSG_NOSIGNAL);
-
-        if (n < 0 && errno == EINTR) {
-            continue;
-        }
-
-        if (n <= 0) {
-            return;
-        }
-
-        used += (size_t) n;
-    }
+    (void) sw_sock_send_all(cfd, reply, strlen(reply));
 }

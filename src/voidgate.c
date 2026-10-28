@@ -9,6 +9,7 @@
 #include "maps.h"
 
 #include <sw/notify.h>
+#include <sw/sock.h>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -21,10 +22,12 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
+
+/* a control or metrics client gets this long to send and to read */
+#define VG_SOCK_TIMEOUT_MS  200
 
 /* the Makefile's, from CONFDIR */
 #ifndef VG_CONF_PATH
@@ -33,7 +36,7 @@
 
 
 static void on_signal(int sig);
-static void sock_timeout(int fd);
+static void sock_unlink(void);
 static long elapsed_ms(const struct timespec *a, const struct timespec *b);
 static void usage(const char *argv0);
 static void redirect_log(int fd);
@@ -44,6 +47,9 @@ static void daemon_stop(const char *path);
 
 static volatile sig_atomic_t g_stop;
 
+/* the process that removes the control socket if it exits early */
+static pid_t vg_sock_owner;
+
 static void
 on_signal(int sig)
 {
@@ -52,13 +58,13 @@ on_signal(int sig)
 }
 
 
+/* atexit(): a start that fails after listening leaves no socket behind */
 static void
-sock_timeout(int fd)
+sock_unlink(void)
 {
-    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
-
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    if (vg_sock_owner == getpid()) {
+        unlink(VG_SOCK_PATH);
+    }
 }
 
 
@@ -116,6 +122,8 @@ daemon_start(int log_fd)
     }
 
     if (child > 0) {
+        /* the daemon's now: on its failed start it removes it itself */
+        vg_sock_owner = 0;
         close(pipefd[1]);
         close(log_fd);
 
@@ -134,6 +142,7 @@ daemon_start(int log_fd)
         exit(0);
     }
 
+    vg_sock_owner = getpid();
     close(pipefd[0]);
     redirect_log(log_fd);
 
@@ -281,13 +290,14 @@ main(int argc, char **argv)
     struct vg_ctrl ctrl;
     const char *cfg_path = VG_CONF_PATH;
     const char *iface_ov = NULL;
-    const char *ctl_group = "";
-    int opt, ctl_fd = -1, http_fd = -1;
+    const char *ctl_group = NULL;
+    int opt, ctl_fd, http_fd = -1;
     int daemon_mode = 0, stop_mode = 0, log_fd = -1, ready_fd = -1;
     int result = 0;
     int pid_fd;
     struct sigaction sa;
     struct timespec last_tick;
+    char err[256];
 
     sw_log_init("voidgate");
 
@@ -341,10 +351,30 @@ main(int argc, char **argv)
      */
     pid_fd = pid_lock(cfg.pid_file);
 
-    if (vg_ctl_server_alive(VG_SOCK_PATH)) {
+    switch (sw_sock_alive(VG_SOCK_PATH)) {
+    case 0:
+        break;
+    case 1:
         unlink(cfg.pid_file);
         sw_log_fatal("another voidgate is already serving %s", VG_SOCK_PATH);
+    default:
+        unlink(cfg.pid_file);
+        sw_log_fatal("can't tell whether a voidgate serves %s: %s",
+                     VG_SOCK_PATH, strerror(errno));
     }
+
+    /* Listening before the fork and the attach: a bad -g stops the start
+     * with the NIC untouched, and reaches the caller's stderr with -d too.
+     */
+    ctl_fd = vg_ctl_server_listen(VG_SOCK_PATH, ctl_group, err, sizeof(err));
+
+    if (ctl_fd < 0) {
+        unlink(cfg.pid_file);
+        sw_log_fatal("control socket %s", err);
+    }
+
+    vg_sock_owner = getpid();
+    atexit(sock_unlink);
 
     if (iface_ov != NULL) {
         snprintf(cfg.interface, sizeof(cfg.interface), "%s", iface_ov);
@@ -407,15 +437,7 @@ main(int argc, char **argv)
         sw_log_fatal("control plane init failed");
     }
 
-    ctl_fd = vg_ctl_server_listen(VG_SOCK_PATH, ctl_group);
-
-    if (ctl_fd < 0) {
-        sw_log_warn("ctl socket %s failed: %s (voidgatectl disabled)",
-                    VG_SOCK_PATH, strerror(errno));
-
-    } else {
-        sw_log_info("ctl socket %s", VG_SOCK_PATH);
-    }
+    sw_log_info("ctl socket %s", VG_SOCK_PATH);
 
     http_fd = vg_http_listen(cfg.metrics_port);
 
@@ -466,11 +488,9 @@ main(int argc, char **argv)
             wait_ms = 0;
         }
 
-        if (ctl_fd >= 0) {
-            pfd[nfds].fd = ctl_fd;
-            pfd[nfds].events = POLLIN;
-            nfds++;
-        }
+        pfd[nfds].fd = ctl_fd;
+        pfd[nfds].events = POLLIN;
+        nfds++;
 
         if (http_fd >= 0) {
             pfd[nfds].fd = http_fd;
@@ -504,7 +524,7 @@ main(int argc, char **argv)
                     continue;
                 }
 
-                sock_timeout(cfd);
+                sw_sock_timeouts(cfd, VG_SOCK_TIMEOUT_MS);
 
                 if (pfd[i].fd == ctl_fd) {
                     vg_ctl_server_handle(&ctrl, cfd);
@@ -529,10 +549,9 @@ main(int argc, char **argv)
     vg_ctrl_free(&ctrl);
     vg_maps_close(&maps);
 
-    if (ctl_fd >= 0) {
-        close(ctl_fd);
-        unlink(VG_SOCK_PATH);
-    }
+    close(ctl_fd);
+    vg_sock_owner = 0;
+    unlink(VG_SOCK_PATH);
 
     if (http_fd >= 0) {
         close(http_fd);

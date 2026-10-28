@@ -3,18 +3,22 @@
 
 #include "bpf/voidgate.h"
 
-#include <errno.h>
+#include <sw/sock.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
+
+
+/* bounds connect() too: a voidgate that never accepts or answers */
+#define VG_CTL_TIMEOUT_MS  5000
+
 
 int
 main(int argc, char **argv)
 {
-    struct sockaddr_un addr;
-    char cmd[256], buf[8192];
+    char cmd[256], buf[8192], err[256];
     int fd, i, failed = 0, replied = 0;
     ssize_t n;
 
@@ -36,26 +40,15 @@ main(int argc, char **argv)
 
     strncat(cmd, "\n", sizeof(cmd) - strlen(cmd) - 1);
 
-    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    fd = sw_sock_connect(VG_SOCK_PATH, VG_CTL_TIMEOUT_MS, err, sizeof(err));
 
     if (fd < 0) {
-        perror("socket");
+        fprintf(stderr, "voidgatectl: %s\n", err);
         return 1;
     }
 
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", VG_SOCK_PATH);
-
-    if (connect(fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
-        fprintf(stderr, "voidgatectl: connect %s: %s\n", VG_SOCK_PATH,
-                strerror(errno));
-        close(fd);
-        return 1;
-    }
-
-    if (write(fd, cmd, strlen(cmd)) < 0) {
-        perror("write");
+    if (sw_sock_send_all(fd, cmd, strlen(cmd)) < 0) {
+        perror("voidgatectl: send");
         close(fd);
         return 1;
     }
