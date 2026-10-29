@@ -891,62 +891,57 @@ vg_drop_flush(struct vg_maps *m)
 
 /*
  * sw_flowd's table and config (Seawall proposals 0007, 0009), for every
- * object voidgate loads to bind: sw_flowd starts first. The table is not
- * versioned: maps of another layout are a sw_flowd built from another
- * sw_flowd.h than voidgate was, and are not bound. Without them, replies
- * to the host's flows are judged as any other until voidgate restarts.
+ * object voidgate loads to bind: sw_flowd starts first. sf_outbound_open()
+ * and sf_config_open() refuse maps of another layout, a sw_flowd built
+ * from another sw_flowd.h than voidgate was. Without them, replies to the
+ * host's flows are judged as any other until voidgate restarts.
  */
 static void
 flows_open(struct vg_maps *m)
 {
-    int tfd, cfd;
-    __u32 len;
-    struct bpf_map_info info, cinfo;
+    int tfd, cfd, e;
+    __u32 size;
 
-    tfd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_OUTBOUND);
-    cfd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_CONFIG);
+    size = 0;
+    tfd = sf_outbound_open(&size);
+    cfd = sf_config_open();
 
-    if (tfd < 0 || cfd < 0) {
+    if (tfd == -ENOENT || cfd == -ENOENT) {
         sw_log_warn("no sw_flowd flow table under %s: replies to the host's "
                     "own flows are judged as any other until voidgate restarts "
                     "with it (start sw_flowd first)", SF_PIN_ROOT);
         goto none;
     }
 
-    memset(&info, 0, sizeof(info));
-    len = sizeof(info);
+    if (tfd < 0 || cfd < 0) {
+        e = tfd < 0 ? -tfd : -cfd;
 
-    if (bpf_map_get_info_by_fd(tfd, &info, &len) != 0) {
-        goto refused;
-    }
+        if (e == EPROTO) {
+            sw_log_warn("sw_flowd's flow table under %s is not the layout "
+                        "this voidgate reads: not reading it", SF_PIN_ROOT);
 
-    memset(&cinfo, 0, sizeof(cinfo));
-    len = sizeof(cinfo);
+        } else {
+            sw_log_warn("sw_flowd's flow table under %s: %s: not reading it",
+                        SF_PIN_ROOT, strerror(e));
+        }
 
-    if (bpf_map_get_info_by_fd(cfd, &cinfo, &len) != 0
-        || info.type != BPF_MAP_TYPE_LRU_HASH
-        || info.key_size != sizeof(struct sf_flow_key)
-        || info.value_size != sizeof(struct sf_flow)
-        || cinfo.type != BPF_MAP_TYPE_ARRAY
-        || cinfo.key_size != sizeof(__u32)
-        || cinfo.value_size != sizeof(struct sf_config))
-    {
-        goto refused;
+        goto none;
     }
 
     m->flows_fd = tfd;
     m->flows_config_fd = cfd;
-    m->flows_size = info.max_entries;
-    m->flows_stats_fd = bpf_obj_get(SF_PIN_ROOT "/" SF_PIN_STATS);
+    m->flows_size = size;
+    /* only the counters go without it */
+    m->flows_stats_fd = sf_stats_open();
+
+    if (m->flows_stats_fd < 0) {
+        m->flows_stats_fd = -1;
+    }
+
     sw_log_info("reading sw_flowd's flow table (%u flows): replies to the "
-                "host's own flows pass an armed gate", info.max_entries);
+                "host's own flows pass an armed gate", size);
 
     return;
-
-refused:
-
-    sw_log_warn("sw_flowd's flow table under %s is not the layout this "
-                "voidgate reads: not reading it", SF_PIN_ROOT);
 
 none:
 
