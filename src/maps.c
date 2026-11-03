@@ -23,14 +23,6 @@
 
 #include <sw_flowd/sw_flowd.h>
 
-/* tcx is Linux 6.6's UAPI: with older headers, such as Amazon Linux
- * 2023's 6.1, voidgate still attaches with tcx on a kernel that has it.
- */
-#ifndef BPF_F_BEFORE
-#define BPF_F_BEFORE  (1U << 3)
-#define BPF_TCX_INGRESS  46
-#endif
-
 /* voidgate's classic TC filter, on a kernel without tcx: a priority
  * before most others (mini-fw's is 0xc000), so it runs first, as tcx's
  * BPF_F_BEFORE and the XDP dispatcher's order have it.
