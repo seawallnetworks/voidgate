@@ -348,7 +348,7 @@ int
 vg_ctl_server_listen(const char *path, const char *group, char *err,
     size_t errlen)
 {
-    return sw_sock_listen(path, 0660, group, err, errlen);
+    return sw_sock_listen_unix(path, 0660, group, err, errlen);
 }
 
 

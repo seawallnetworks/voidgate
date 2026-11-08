@@ -351,7 +351,7 @@ main(int argc, char **argv)
      */
     pid_fd = pid_lock(cfg.pid_file);
 
-    switch (sw_sock_alive(VG_SOCK_PATH)) {
+    switch (sw_sock_alive_unix(VG_SOCK_PATH)) {
     case 0:
         break;
     case 1:

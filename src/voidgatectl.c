@@ -40,7 +40,8 @@ main(int argc, char **argv)
 
     strncat(cmd, "\n", sizeof(cmd) - strlen(cmd) - 1);
 
-    fd = sw_sock_connect(VG_SOCK_PATH, VG_CTL_TIMEOUT_MS, err, sizeof(err));
+    fd = sw_sock_connect_unix(VG_SOCK_PATH, VG_CTL_TIMEOUT_MS, err,
+                              sizeof(err));
 
     if (fd < 0) {
         fprintf(stderr, "voidgatectl: %s\n", err);
