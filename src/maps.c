@@ -882,7 +882,7 @@ vg_drop_flush(struct vg_maps *m)
 
 
 /*
- * sw_flowd's table and config (Seawall proposals 0007, 0009), for every
+ * sw_flowd's table and config (Seawall proposal 0015), for every
  * object voidgate loads to bind: sw_flowd starts first. sf_outbound_open()
  * and sf_config_open() refuse maps of another layout, a sw_flowd built
  * from another sw_flowd.h than voidgate was. Without them, replies to the

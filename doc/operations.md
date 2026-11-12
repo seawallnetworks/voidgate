@@ -30,11 +30,15 @@ gate, counts sources and installs CIDRs into an LPM drop tree.
 | ACTIVE (`armed=1`) | Parses IPv4/IPv6, drops prefixes in the drop trees, passes replies to the host's own flows, counts sources | rx below both wake thresholds for `clear_seconds` and the drop tree is empty |
 
 An armed gate passes replies to flows the host opened itself (a download,
-an update, a DNS query) and never counts them against their source, so a
-fast download cannot get its server banned. It reads them from
-[sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table, which
-records the host's outbound flows at TC egress (Seawall proposals 0007
-and 0009). voidgate binds that table when it starts, so sw_flowd starts
+an update, a DNS query, a ping) and never counts them against their
+source, so a fast download cannot get its server banned. It reads them
+from [sw_flowd](https://github.com/seawallnetworks/sw_flowd)'s table,
+which records the host's outbound flows at TC egress (Seawall proposal
+0015). A reply is TCP with ACK or RST, UDP to an ephemeral port, an echo
+reply, or an ICMP error about a packet the host sent, of a flow in the
+table; a TCP flow the host closed lasts at most 120 s after its FIN,
+10 s after its RST, and `reply_idle_seconds` if that is shorter. A path MTU error about no flow of the host's is not one: it
+costs nothing to forge. voidgate binds that table when it starts, so sw_flowd starts
 first (the unit is `After=` and `Wants=sw_flowd.service`). Started
 without it, voidgate judges those replies as any other until it is
 restarted; restarting sw_flowd needs no restart of voidgate, `sw_flowd

@@ -8,7 +8,7 @@
  * ACTIVE (cfg.armed == 1), first match wins:
  *   1. whitelist                                → count, PASS
  *   2. reply to a flow the host opened, found
- *      in sw_flowd's table (Seawall 0007)       → PASS, source not counted
+ *      in sw_flowd's table (Seawall 0015)       → PASS, source not counted
  *   3. source or destination in drop LPM        → DROP
  *   4. anything else                            → count, PASS
  *
@@ -25,11 +25,17 @@
 #include <xdp/xdp_helpers.h>
 #include "voidgate.h"
 #include <libpkt/parse.h>
+/* sw_flowd's ICMP error check, SF_DEFINE_ICMP_ERR_REPLY() */
+#define SF_ICMP_ERR_REPLY
 #include <sw_flowd/sw_flowd.h>
 
 /* vg_judge()'s verdict; each entry turns it into its hook's. */
 #define VG_PASS  0
 #define VG_DROP  1
+
+/* which entry vg_judge() runs in: a constant, so each keeps its own call */
+#define VG_HOOK_XDP  0
+#define VG_HOOK_TC   1
 
 
 static __always_inline struct vg_metrics *get_metrics(void);
@@ -51,9 +57,8 @@ static __always_inline int v6_tcp_allowed(const struct vg_cfg *c,
     const __u8 saddr[16], const __u8 daddr[16], __u16 sport, __u16 dport);
 static __always_inline int v6_hop_limit(void *data, void *data_end,
     __u16 l3_off);
-static __always_inline int is_reply(const struct vg_cfg *c,
-    __u8 family, __u8 proto, const void *saddr, __u16 sport, __u16 dport,
-    __u8 tcp_flags);
+static __always_inline int is_reply(const struct vg_cfg *c, int rc,
+    const struct pkt_meta *pm, void *ctx, int hook);
 
 /* Userspace ARRAY[1]: armed and allow_ports. XDP reads. */
 struct {
@@ -169,7 +174,7 @@ struct {
 } remote_v6 SEC(".maps");
 
 
-/* sw_flowd's flow table and its config (Seawall proposal 0009): userspace
+/* sw_flowd's flow table and its config (Seawall proposal 0015): userspace
  * binds their pinned maps here before the load (bpf_map__reuse_fd), with
  * the table's size sw_flowd's. Without them, these are voidgate's own and
  * stay empty: no flow, as before sw_flowd.
@@ -188,6 +193,13 @@ struct {
     __type(key, __u32);
     __type(value, struct sf_config);
 } flows_config SEC(".maps");
+
+
+/* sw_flowd's ICMP error check on the table, for each entry: global
+ * functions, which the verifier walks once, not once a path (sw_flowd.h)
+ */
+SF_DEFINE_ICMP_ERR_REPLY(vg_icmp_err_xdp, struct xdp_md, flows)
+SF_DEFINE_ICMP_ERR_REPLY(vg_icmp_err_tc, struct __sk_buff, flows)
 
 
 static __always_inline struct vg_metrics *
@@ -395,39 +407,39 @@ v6_hop_limit(void *data, void *data_end, __u16 l3_off)
 }
 
 
-/* Is this packet to a local address a reply to a flow the host opened:
- * one sw_flowd recorded leaving within reply_idle_ns? Only what can
- * be a reply is looked up: TCP with ACK (a reply is a SYN-ACK or later),
- * UDP to a port in the ephemeral range sw_flowd records UDP from. Other
- * protocols are never recorded, so their lookup misses.
+/* Is this packet to a local address, parsed with status rc, a reply to a
+ * flow the host opened: what sw_flowd's sf_is_reply() or, for an ICMP
+ * error, sf_icmp_err_reply() says is one, within
+ * reply_idle_ns, TCP's and UDP's alike (Seawall proposal 0015 §2 and §3)?
+ * A path MTU error with no flow behind it is not: it costs nothing to
+ * forge, and passing it would let a flood past the count and the drops.
  */
 static __always_inline int
-is_reply(const struct vg_cfg *c, __u8 family, __u8 proto,
-    const void *saddr, __u16 sport, __u16 dport, __u8 tcp_flags)
+is_reply(const struct vg_cfg *c, int rc, const struct pkt_meta *pm,
+    void *ctx, int hook)
 {
-    struct sf_config *fc;
-    __u64 seen;
-    __u32 zero = 0;
+    struct sf_idle idle;
 
-    if (proto == IPPROTO_TCP && !(tcp_flags & PKT_TCP_ACK)) {
+    if (rc != PKT_OK) {
         return 0;
     }
 
-    if (proto == IPPROTO_UDP) {
-        fc = bpf_map_lookup_elem(&flows_config, &zero);
+    idle.tcp_ns = c->reply_idle_ns;
+    idle.udp_ns = c->reply_idle_ns;
 
-        if (fc == NULL || dport < fc->port_lo || dport > fc->port_hi) {
-            return 0;
-        }
+    if (sf_is_reply(&flows, &flows_config, pm, &idle) == SF_REPLY) {
+        return 1;
     }
 
-    seen = sf_flow_seen(&flows, family, proto, saddr, sport, dport);
-
-    if (seen == 0) {
+    if (!sf_is_icmp_err(pm)) {
         return 0;
     }
 
-    return bpf_ktime_get_coarse_ns() - seen < c->reply_idle_ns;
+    if (hook == VG_HOOK_XDP) {
+        return vg_icmp_err_xdp(ctx, &idle) == SF_REPLY;
+    }
+
+    return vg_icmp_err_tc(ctx, &idle) == SF_REPLY;
 }
 
 
@@ -440,18 +452,18 @@ is_reply(const struct vg_cfg *c, __u8 family, __u8 proto,
  * so the drop LPM still applies and the port exemptions cannot; a
  * non-first fragment or another protocol, judged without ports.
  *
- * The ports, TCP flags and ICMPv6 type are read on PKT_OK only, and are 0
+ * The ports and the ICMPv6 type are read on PKT_OK only, and are 0
  * otherwise, as libpkt leaves them: read whatever the status, clang
  * stored them again before each of the parse's early returns, which cost
  * IPv4 4-11 ns a frame.
  */
 static __always_inline int
 vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
-    __u64 pkts, __u64 pkt_len)
+    __u64 pkts, __u64 pkt_len, void *ctx, int hook)
 {
     struct pkt_meta pm;
     __u16 sport, dport;
-    __u8 tcp_flags, icmp6_type;
+    __u8 icmp6_type;
     int rc, local = -1;
 
     rc = pkt_parse(data, data_end, &pm);
@@ -471,14 +483,12 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
     if (rc == PKT_OK) {
         sport = bpf_ntohs(pm.sport);
         dport = bpf_ntohs(pm.dport);
-        tcp_flags = pm.tcp_flags;
         /* read on the IPv6 path only, where libpkt reads ICMPv6 alone */
         icmp6_type = pm.icmp_type;
 
     } else {
         sport = 0;
         dport = 0;
-        tcp_flags = 0;
         icmp6_type = 0;
 
         if (rc != PKT_NO_L4) {
@@ -511,8 +521,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         local = v4_in_lpm(&local_v4, daddr);
 
         /* not counted against its source, which it would get banned */
-        if (local && is_reply(c, SF_FAMILY_V4, pm.l4_proto, &saddr, sport,
-                              dport, tcp_flags))
+        if (local && is_reply(c, rc, &pm, ctx, hook))
         {
             host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
 
@@ -562,7 +571,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         /* RFC 4861: real NDP is sent with hop limit 255 and the kernel drops
          * anything else, so a routed NS/RA flood cannot use this exemption.
          */
-        if (icmp6_type >= VG_NDISC_RS && icmp6_type <= VG_NDISC_REDIRECT
+        if (pm.l4_proto == IPPROTO_ICMPV6
+            && icmp6_type >= VG_NDISC_RS && icmp6_type <= VG_NDISC_REDIRECT
             && v6_hop_limit(data, data_end, pm.l3_off) == VG_NDISC_HOP_LIMIT)
         {
             goto v6_count;
@@ -588,8 +598,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         local = v6_in_lpm(&local_v6, daddr.addr);
 
-        if (local && is_reply(c, SF_FAMILY_V6, pm.l4_proto, saddr.addr, sport,
-                              dport, tcp_flags))
+        if (local && is_reply(c, rc, &pm, ctx, hook))
         {
             host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
 
@@ -673,7 +682,9 @@ voidgate_xdp(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    if (vg_judge(data, data_end, c, m, 1, pkt_len) == VG_DROP) {
+    if (vg_judge(data, data_end, c, m, 1, pkt_len, ctx, VG_HOOK_XDP)
+        == VG_DROP)
+    {
         return XDP_DROP;
     }
 
@@ -713,14 +724,15 @@ voidgate_tc(struct __sk_buff *ctx)
     }
 
     /* A TC program reads only the skb's linear part, which may hold just
-     * the Ethernet header. Pull only when it is short of PKT_HDR_MAX, the
-     * most libpkt reads: a pull makes the skb writable, copying a cloned
-     * skb's head. One that fails leaves the short view, judged without
-     * ports, like a truncated header.
+     * the Ethernet header. Pull only when it is short of PKT_ICMP_ERR_MAX,
+     * the most libpkt reads, an ICMP error's embedded header included: a
+     * pull makes the skb writable, copying a cloned skb's head. One that
+     * fails leaves the short view, judged without ports, like a truncated
+     * header.
      */
     data = (void *) (long) ctx->data;
     data_end = (void *) (long) ctx->data_end;
-    want = ctx->len < PKT_HDR_MAX ? ctx->len : PKT_HDR_MAX;
+    want = ctx->len < PKT_ICMP_ERR_MAX ? ctx->len : PKT_ICMP_ERR_MAX;
 
     if (data + want > data_end) {
         bpf_skb_pull_data(ctx, want);
@@ -728,7 +740,9 @@ voidgate_tc(struct __sk_buff *ctx)
         data_end = (void *) (long) ctx->data_end;
     }
 
-    if (vg_judge(data, data_end, c, m, pkts, ctx->len) == VG_DROP) {
+    if (vg_judge(data, data_end, c, m, pkts, ctx->len, ctx, VG_HOOK_TC)
+        == VG_DROP)
+    {
         return TC_ACT_SHOT;
     }
 

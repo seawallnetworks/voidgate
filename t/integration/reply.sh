@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: Apache-2.0
-# Integration: replies to the host's own flows (Seawall proposal 0007),
-# with sw_flowd (0009) recording them at egress, its table bound when
+# Integration: replies to the host's own flows (Seawall proposal 0015),
+# with sw_flowd recording them at egress, its table bound when
 # voidgate starts. A download from the peer arms the gate and survives
 # it, a manual drop of its server too; a flood from the same address is
 # still dropped; without sw_flowd's table the download gets its server
@@ -49,7 +49,7 @@ fail() {
 }
 
 # The download arms the gate (wake_mbps) and is over threshold_mbps on
-# its own, as the incident in 0007 had it; nothing else wakes it.
+# its own, as the incident in 0015 had it; nothing else wakes it.
 write_conf() {
     cat > "$CONF" <<EOF
 interface = test0
@@ -136,6 +136,24 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 end = time.time() + 2
 while time.time() < end:
     s.sendto(b"x" * 512, ("198.51.100.10", 9))
+PY
+}
+
+# icmp_err <type> <code> <proto> <sport> <dport> <count>: ICMP errors
+# from the peer about a packet this host sent it, of protocol proto from
+# sport to dport; the 8 bytes of L4 an error carries
+icmp_err() {
+    ip netns exec "$NS" python3 - "$@" <<'PY'
+import socket, struct, sys
+t, c, proto, sport, dport, n = map(int, sys.argv[1:])
+inner = struct.pack("!BBHHHBBH4s4s", 0x45, 0, 28, 0, 0, 64, proto, 0,
+                    socket.inet_aton("198.51.100.10"),
+                    socket.inet_aton("198.51.100.1"))
+inner += struct.pack("!HHHH", sport, dport, 8, 0)
+msg = struct.pack("!BBHI", t, c, 0, 0) + inner
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+for _ in range(n):
+    s.sendto(msg, ("198.51.100.10", 0))
 PY
 }
 
@@ -237,11 +255,44 @@ echo "ok - a restart of sw_flowd needs no restart of voidgate"
 "$CTL" drop 198.51.100.0/30 > /dev/null
 got=$(download 198.51.100.1)
 [[ $got == "$SIZE" ]] || fail "download under a manual drop got $got"
-"$CTL" undrop 198.51.100.0/30 > /dev/null
 echo "ok - a flow the host opens survives a manual drop of its server"
 
+# the download armed the gate; the server is still dropped: its echo
+# replies are the host's own (Seawall proposal 0015 §2)
+[[ $(stat state) == active ]] || fail "the download should have armed the gate"
+ping -c 1 -W 2 198.51.100.1 > /dev/null \
+    || fail "ping to a dropped server got no reply"
+echo "ok - so do the echo replies of the host's ping"
+
+# ICMP errors about the host's own UDP flow pass, uncounted; path MTU
+# errors about no flow of the host's don't, from the dropped server
+python3 -c 'import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", 50500)); s.sendto(b"q", ("198.51.100.1", 9999))'
+sleep 0.5
+passed=$(stat reply_passed)
+drops=$(stat dropped)
+icmp_err 3 3 17 50500 9999 50
+sleep 0.2
+(( $(stat reply_passed) - passed >= 50 )) \
+    || fail "errors about the host's flow were not passed as replies"
+(( $(stat dropped) - drops < 5 )) \
+    || fail "errors about the host's flow were dropped"
+echo "ok - ICMP errors about the host's flow pass its server's drop"
+
+passed=$(stat reply_passed)
+drops=$(stat dropped)
+icmp_err 3 4 6 50600 443 50
+sleep 0.2
+(( $(stat dropped) - drops >= 50 )) \
+    || fail "path MTU errors about no flow passed a dropped source"
+(( $(stat reply_passed) - passed < 5 )) \
+    || fail "path MTU errors about no flow were passed as replies"
+echo "ok - path MTU errors about no flow of the host's are still dropped"
+"$CTL" undrop 198.51.100.0/30 > /dev/null
+
 # sw_flowd purged: a voidgate started after that runs without a table,
-# and the download gets its server banned, as before 0007
+# and the download gets its server banned, as without the table
 stop_flowd
 "$FLOWD" -P >> "$work/sw_flowd.log" 2>&1
 stop_vg
