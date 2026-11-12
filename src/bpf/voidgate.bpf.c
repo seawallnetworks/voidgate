@@ -472,7 +472,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         sport = bpf_ntohs(pm.sport);
         dport = bpf_ntohs(pm.dport);
         tcp_flags = pm.tcp_flags;
-        icmp6_type = pm.icmp6_type;
+        /* read on the IPv6 path only, where libpkt reads ICMPv6 alone */
+        icmp6_type = pm.icmp_type;
 
     } else {
         sport = 0;
