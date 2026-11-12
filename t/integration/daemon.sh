@@ -31,7 +31,8 @@ mkdir "$work/log"
 printf 'log_file = %s\n' "$work/log/voidgate.log" >> base.conf
 
 status() {
-    [[ $(timeout 2 "$root/voidgatectl" status) == state=idle* ]]
+    # the last line: without sw_flowd's table a CRITICAL line comes first
+    [[ $(timeout 2 "$root/voidgatectl" status | tail -1) == state=idle* ]]
 }
 
 start_daemon() {

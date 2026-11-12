@@ -104,6 +104,7 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     m->flows_fd = -1;
     m->flows_config_fd = -1;
     m->flows_stats_fd = -1;
+    m->flows_problem[0] = '\0';
 
     bump_memlock();
     sw_bpf_log_init();
@@ -886,7 +887,9 @@ vg_drop_flush(struct vg_maps *m)
  * object voidgate loads to bind: sw_flowd starts first. sf_outbound_open()
  * and sf_config_open() refuse maps of another layout, a sw_flowd built
  * from another sw_flowd.h than voidgate was. Without them, replies to the
- * host's flows are judged as any other until voidgate restarts.
+ * host's flows are judged as any other until voidgate restarts: a broken
+ * install, not a state to run in (0015 §6), so it is logged at crit, and
+ * status says so first (flows_problem).
  */
 static void
 flows_open(struct vg_maps *m)
@@ -899,9 +902,8 @@ flows_open(struct vg_maps *m)
     cfd = sf_config_open();
 
     if (tfd == -ENOENT || cfd == -ENOENT) {
-        sw_log_warn("no sw_flowd flow table under %s: replies to the host's "
-                    "own flows are judged as any other until voidgate restarts "
-                    "with it (start sw_flowd first)", SF_PIN_ROOT);
+        snprintf(m->flows_problem, sizeof(m->flows_problem),
+                 "no sw_flowd flow table under %s", SF_PIN_ROOT);
         goto none;
     }
 
@@ -909,12 +911,14 @@ flows_open(struct vg_maps *m)
         e = tfd < 0 ? -tfd : -cfd;
 
         if (e == EPROTO) {
-            sw_log_warn("sw_flowd's flow table under %s is not the layout "
-                        "this voidgate reads: not reading it", SF_PIN_ROOT);
+            snprintf(m->flows_problem, sizeof(m->flows_problem),
+                     "sw_flowd's flow table under %s is not the layout this "
+                     "voidgate reads", SF_PIN_ROOT);
 
         } else {
-            sw_log_warn("sw_flowd's flow table under %s: %s: not reading it",
-                        SF_PIN_ROOT, strerror(e));
+            snprintf(m->flows_problem, sizeof(m->flows_problem),
+                     "sw_flowd's flow table under %s: %s", SF_PIN_ROOT,
+                     strerror(e));
         }
 
         goto none;
@@ -936,6 +940,10 @@ flows_open(struct vg_maps *m)
     return;
 
 none:
+
+    sw_log_crit("%s: replies to the host's own flows are judged as any "
+                "other until voidgate restarts with it (start sw_flowd, "
+                "then restart voidgate)", m->flows_problem);
 
     if (tfd >= 0) {
         close(tfd);

@@ -246,8 +246,8 @@ scripts.
 
 | Command | Effect | Typical answer |
 | --- | --- | --- |
-| `status` | State summary | `state=IDLE armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0` |
-| `stats` | Data-plane counters and rates; `flows` is `sw_flowd` while its table is read, `none` without it | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
+| `status` | State summary; `flows` as in `stats`. Without sw_flowd's table, a first line `CRITICAL: …` says so, until voidgate restarts with it | `state=IDLE armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0 flows=sw_flowd` |
+| `stats` | Data-plane counters and rates; `flows` is `sw_flowd` while its table is read, `none` without it, when a `CRITICAL: …` first line says so, as in `status` | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
 | `drops` | Installed prefixes with reason and age | one line per prefix, or `(none)` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
 | `disarm` | Flush the drop tree, back to IDLE | `ok` |
@@ -264,8 +264,8 @@ drops after a restart.
 
 Daily checks:
 
-1. `voidgatectl status`: expect `state=IDLE`, `degraded=0` and the right
-   `iface`.
+1. `voidgatectl status`: expect `state=IDLE`, `degraded=0`, the right
+   `iface`, `flows=sw_flowd`, and no `CRITICAL` line.
 2. `voidgatectl drops`: review manual drops (reason 1); they never
    expire.
 3. `voidgatectl stats`: `map_full` and `parse_err` should not be
@@ -393,7 +393,8 @@ restart.
 5. `sudo systemctl daemon-reload && sudo systemctl restart voidgate`. The
    NIC is unprotected for the short gap between detach and attach.
 6. Re-apply the reason=1 drops you saved with `voidgatectl drop <cidr>`.
-7. Check `voidgatectl status` shows `degraded=0` and the expected `hook`.
+7. Check `voidgatectl status` shows `degraded=0`, the expected `hook`,
+   `flows=sw_flowd`, and no `CRITICAL` line.
 
 **Testing before rollout**
 
@@ -442,7 +443,7 @@ there.
 | `error: reload failed` | Bad value in the config | Fix the line the log names; the old config keeps running |
 | Gate stays armed after the flood | A drop is still installed (manual drops never expire) | `voidgatectl drops`; `undrop` or `disarm` |
 | Legitimate clients dropped | Shared NAT or proxy over threshold, or aggregation | `undrop`, add the range to `allow_networks`, `reload`; raise `aggregate_k` |
-| A download's or update's server dropped | sw_flowd wasn't running when voidgate started (`stats` shows `flows=none`) | Start sw_flowd, then restart voidgate: it binds the table when it starts |
+| A download's or update's server dropped; `status` starts with `CRITICAL:` (no sw_flowd flow table, or one of another layout), and the journal has it at `crit` | sw_flowd wasn't running when voidgate started, or its table is of another layout (`flows=none`): a broken install, not a state to run in (Seawall proposal 0015 §6) | Start sw_flowd, then restart voidgate: it binds the table when it starts. After an upgrade, the stack's sw_flowd and voidgate must come from one release |
 | SSH lost during an attack | Port not in `allow_ports`, or SSH on a non-local address | Keep `22` (or your SSH port) in `allow_ports`; check `local_networks` |
 | `map_full` climbing | Too many sources for `remote_map_size` or `drop_map_size` | Lower `aggregate_k` so `/24` and `/64` drops relieve the tree; raise sizes and restart |
 | `ban()` from nginx does nothing | Worker user not in `voidgate`, or address in an allow list | Check the nginx error log for the daemon's answer |

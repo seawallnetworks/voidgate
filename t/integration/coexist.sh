@@ -92,7 +92,7 @@ tc_filter() {
 
 # The hook is free: voidgate makes the dispatcher, and takes it off on exit.
 start_daemon -c base.conf
-[[ $(status) == *' hook=xdp-skb degraded=0' ]]
+[[ $(status) == *' hook=xdp-skb degraded=0 '* ]]
 xdp-loader status test0 | grep -q 'xdp_dispatcher'
 xdp-loader status test0 | grep -q ' 10 *voidgate_xdp '
 stop_daemon
@@ -105,7 +105,7 @@ ip link set dev test0 mtu 9000
 cp base.conf native.conf
 printf 'xdp_mode = native\n' >> native.conf
 start_daemon -c native.conf
-[[ $(status) == *' hook=xdp-native degraded=0' ]]
+[[ $(status) == *' hook=xdp-native degraded=0 '* ]]
 stop_daemon
 ip link set dev test0 mtu 1500
 ip link set dev peer0 mtu 1500
@@ -116,7 +116,7 @@ printf 'xdp_mode = auto\n' >> auto.conf
 ip link add dummy0 type dummy
 ip link set dev dummy0 up
 start_daemon -c auto.conf -i dummy0
-[[ $(status) == *' hook=xdp-skb degraded=0' ]]
+[[ $(status) == *' hook=xdp-skb degraded=0 '* ]]
 grep -q 'native XDP attach failed' "$work/log/voidgate.log"
 stop_daemon
 ip link del dummy0
@@ -125,7 +125,7 @@ ip link del dummy0
 # would take native on a veth), and leaves it to the other.
 xdp-filter load -m skb test0
 start_daemon -c auto.conf
-[[ $(status) == *' hook=xdp-skb degraded=0' ]]
+[[ $(status) == *' hook=xdp-skb degraded=0 '* ]]
 [[ $(in_dispatcher) == 1 ]]
 xdp-loader status test0 | grep -q 'xdpfilt_'
 stop_daemon
@@ -138,7 +138,7 @@ xdp-filter unload test0 --all
 ip link set dev test0 xdpgeneric obj pass.bpf.o sec xdp
 customer=$(xdp_id)
 start_daemon -c base.conf
-[[ $(status) == *' hook=tcx degraded=1' ]]
+[[ $(status) == *' hook=tcx degraded=1 '* ]]
 [[ $(xdp_id) == "$customer" ]]
 bpftool net show dev test0 | grep -q 'tcx/ingress voidgate_tc'
 grep -q 'degraded: customer holds' "$work/log/voidgate.log"
@@ -151,7 +151,7 @@ grep -q 'detached tcx from ifindex' "$work/log/voidgate.log"
 
 # Classic TC on a kernel without tcx.
 SW_NO_TCX=1 start_daemon -c base.conf
-[[ $(status) == *' hook=tc degraded=1' ]]
+[[ $(status) == *' hook=tc degraded=1 '* ]]
 [[ $(tc_filter) == 1 ]]
 stop_daemon
 [[ $(tc_filter) == 0 ]]
@@ -185,7 +185,7 @@ SW_NO_TCX=1 start_daemon -c tc.conf
 kill_daemon
 [[ $(tc_filter) == 1 ]]
 start_daemon -c base.conf
-[[ $(status) == *' hook=xdp-skb degraded=0' ]]
+[[ $(status) == *' hook=xdp-skb degraded=0 '* ]]
 [[ $(tc_filter) == 0 ]]
 stop_daemon
 

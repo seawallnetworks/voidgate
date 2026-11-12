@@ -207,7 +207,13 @@ stop_flowd() {
 # without, and a table that comes later is not picked up
 start_vg
 [[ $(stat flows) == none ]] || fail "expected flows=none before sw_flowd"
-grep -q 'no sw_flowd flow table' "$LOG" || fail "expected the no-table line"
+grep -q '\[CRIT\] no sw_flowd flow table' "$LOG" \
+    || fail "expected the no-table line, at crit"
+# a broken install: status and stats say so first (Seawall proposal 0015 §6)
+"$CTL" status | head -1 | grep -q '^CRITICAL: no sw_flowd flow table' \
+    || fail "expected status to start with CRITICAL"
+"$CTL" stats | head -1 | grep -q '^CRITICAL: ' \
+    || fail "expected stats to start with CRITICAL"
 start_flowd
 [[ $(stat flows) == none ]] || fail "a running voidgate picked up a new table"
 echo "ok - voidgate started before sw_flowd runs without its table"
@@ -217,6 +223,8 @@ start_vg
 grep -q "reading sw_flowd's flow table" "$LOG" \
     || fail "voidgate did not bind sw_flowd's table at start"
 [[ $(stat flows) == sw_flowd ]] || fail "expected flows=sw_flowd"
+"$CTL" status | grep -q '^CRITICAL' && fail "status CRITICAL with the table"
+"$CTL" status | grep -q 'flows=sw_flowd' || fail "expected status flows=sw_flowd"
 echo "ok - voidgate started after sw_flowd reads its table"
 
 got=$(download 198.51.100.1)
@@ -315,9 +323,12 @@ bpftool map create "$PINS/config" type array key 4 value 8 entries 1 \
     name config
 stop_vg
 start_vg
-grep -q "is not the layout this voidgate reads" "$LOG" \
-    || fail "voidgate did not refuse a table of another layout"
+grep -q "\[CRIT\] .*is not the layout this voidgate reads" "$LOG" \
+    || fail "voidgate did not refuse a table of another layout, at crit"
 [[ $(stat flows) == none ]] || fail "expected flows=none for that table"
+"$CTL" status | head -1 \
+    | grep -q "^CRITICAL: sw_flowd's flow table under .* is not the layout" \
+    || fail "expected status to say the table is of another layout"
 rm -f "$PINS/outbound" "$PINS/config"
 echo "ok - a table of another layout is refused"
 

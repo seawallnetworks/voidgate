@@ -35,6 +35,11 @@ struct vg_maps {
     int                   flows_config_fd;
     uint32_t              flows_size;
     int                   flows_stats_fd;
+    /*
+     * why sw_flowd's table isn't read, for status' CRITICAL line; empty
+     * while it is
+     */
+    char                  flows_problem[128];
 };
 
 

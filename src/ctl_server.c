@@ -30,6 +30,8 @@ typedef struct {
 } vg_ctl_command_t;
 
 
+static int ctl_critical(struct vg_ctrl *ctrl, char *reply,
+    size_t reply_size);
 static void ctl_status(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static void ctl_stats(struct vg_ctrl *ctrl, const char *args,
@@ -62,18 +64,49 @@ static const vg_ctl_command_t  vg_ctl_commands[] = {
 };
 
 
+/*
+ * Without sw_flowd's table, the first line of status and stats: a broken
+ * install (Seawall proposal 0015 §6), shown until voidgate restarts with
+ * the table. No "=" in it, so a client reading key=value pairs, as
+ * lua/resty/voidgate.lua does, skips it. Returns its length.
+ */
+static int
+ctl_critical(struct vg_ctrl *ctrl, char *reply, size_t reply_size)
+{
+    int  n;
+
+    if (ctrl->maps->flows_fd >= 0) {
+        reply[0] = '\0';
+        return 0;
+    }
+
+    n = snprintf(reply, reply_size,
+                 "CRITICAL: %s: replies to the host's own flows are judged "
+                 "as any other; start sw_flowd, then restart voidgate\n",
+                 ctrl->maps->flows_problem[0] != '\0'
+                 ? ctrl->maps->flows_problem : "no sw_flowd flow table");
+
+    return n < 0 ? 0 : (size_t) n >= reply_size ? (int) reply_size - 1 : n;
+}
+
+
 static void
 ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
-    snprintf(reply, reply_size,
+    int  n;
+
+    n = ctl_critical(ctrl, reply, reply_size);
+
+    snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
-             "prefixes=%d iface=%s hook=%s degraded=%d\n",
+             "prefixes=%d iface=%s hook=%s degraded=%d flows=%s\n",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
              ctrl->drop_count,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
-             ctrl->maps->degraded);
+             ctrl->maps->degraded,
+             ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
 }
 
 
@@ -81,6 +114,7 @@ static void
 ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
+    int                n;
     struct vg_metrics  m;
 
     if (vg_metrics_read(ctrl->maps, &m) < 0) {
@@ -88,7 +122,9 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
         return;
     }
 
-    snprintf(reply, reply_size,
+    n = ctl_critical(ctrl, reply, reply_size);
+
+    snprintf(reply + n, reply_size - n,
              "rx_pkts=%llu rx_bytes=%llu passed=%llu dropped=%llu "
              "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu\n"
              "rx_pps=%.0f rx_bps=%.0f state=%s prefixes=%d flows=%s\n",
