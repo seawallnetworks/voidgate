@@ -82,9 +82,10 @@ ctl_critical(struct vg_ctrl *ctrl, char *reply, size_t reply_size)
 
     n = snprintf(reply, reply_size,
                  "CRITICAL: %s: replies to the host's own flows are judged "
-                 "as any other; start sw_flowd, then restart voidgate\n",
+                 "as any other; %s\n",
                  ctrl->maps->flows_problem[0] != '\0'
-                 ? ctrl->maps->flows_problem : "no sw_flowd flow table");
+                 ? ctrl->maps->flows_problem : "no sw_flowd flow table",
+                 ctrl->maps->flows_fix);
 
     return n < 0 ? 0 : (size_t) n >= reply_size ? (int) reply_size - 1 : n;
 }

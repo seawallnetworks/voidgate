@@ -105,6 +105,7 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     m->flows_config_fd = -1;
     m->flows_stats_fd = -1;
     m->flows_problem[0] = '\0';
+    m->flows_fix = "start sw_flowd, then restart voidgate";
 
     bump_memlock();
     sw_bpf_log_init();
@@ -904,6 +905,7 @@ flows_open(struct vg_maps *m)
     if (tfd == -ENOENT || cfd == -ENOENT) {
         snprintf(m->flows_problem, sizeof(m->flows_problem),
                  "no sw_flowd flow table under %s", SF_PIN_ROOT);
+        m->flows_fix = "start sw_flowd, then restart voidgate";
         goto none;
     }
 
@@ -914,11 +916,16 @@ flows_open(struct vg_maps *m)
             snprintf(m->flows_problem, sizeof(m->flows_problem),
                      "sw_flowd's flow table under %s is not the layout this "
                      "voidgate reads", SF_PIN_ROOT);
+            m->flows_fix = "install sw_flowd and voidgate of one release, "
+                           "stop sw_flowd, run sw_flowd -P, start it, then "
+                           "restart voidgate";
 
         } else {
             snprintf(m->flows_problem, sizeof(m->flows_problem),
                      "sw_flowd's flow table under %s: %s", SF_PIN_ROOT,
                      strerror(e));
+            m->flows_fix = "see why in the log above, then restart "
+                           "voidgate";
         }
 
         goto none;
@@ -942,8 +949,8 @@ flows_open(struct vg_maps *m)
 none:
 
     sw_log_crit("%s: replies to the host's own flows are judged as any "
-                "other until voidgate restarts with it (start sw_flowd, "
-                "then restart voidgate)", m->flows_problem);
+                "other until voidgate restarts with it (%s)",
+                m->flows_problem, m->flows_fix);
 
     if (tfd >= 0) {
         close(tfd);

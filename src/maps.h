@@ -40,6 +40,8 @@ struct vg_maps {
      * while it is
      */
     char                  flows_problem[128];
+    /* what to do about it: it depends on what it is */
+    const char           *flows_fix;
 };
 
 

@@ -157,6 +157,37 @@ for _ in range(n):
 PY
 }
 
+# icmp6_err <type> <code> <proto> <sport> <dport> <count>: ICMPv6 errors
+# from the peer about a packet this host sent it; the kernel sums them
+icmp6_err() {
+    ip netns exec "$NS" python3 - "$@" <<'PY'
+import socket, struct, sys
+t, c, proto, sport, dport, n = map(int, sys.argv[1:])
+inner = struct.pack("!IHBB16s16s", 0x60000000, 8, proto, 64,
+                    socket.inet_pton(socket.AF_INET6, "2001:db8::10"),
+                    socket.inet_pton(socket.AF_INET6, "2001:db8::1"))
+inner += struct.pack("!HHHH", sport, dport, 8, 0)
+msg = struct.pack("!BBHI", t, c, 0, 1280 if t == 2 else 0) + inner
+s = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_ICMPV6)
+for _ in range(n):
+    s.sendto(msg, ("2001:db8::10", 0))
+PY
+}
+
+# rst_to <lport> <count>: RSTs without ACK from the peer's 8080 to this
+# host's lport, out of window: what a peer's RST to an old segment is
+rst_to() {
+    ip netns exec "$NS" python3 - "$@" <<'PY'
+import socket, struct, sys
+lport, n = map(int, sys.argv[1:])
+tcp = struct.pack("!HHIIBBHHH", 8080, lport, 12345, 0, 5 << 4, 0x04,
+                  0, 0, 0)
+s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_TCP)
+for _ in range(n):
+    s.sendto(tcp, ("198.51.100.10", 0))
+PY
+}
+
 stat() {
     "$CTL" stats | tr ' ' '\n' | sed -n "s/^$1=//p"
 }
@@ -297,7 +328,48 @@ sleep 0.2
 (( $(stat reply_passed) - passed < 5 )) \
     || fail "path MTU errors about no flow were passed as replies"
 echo "ok - path MTU errors about no flow of the host's are still dropped"
+
+# a RST without ACK on a connection the host opened passes too: one
+# answering a segment with ACK carries no ACK of its own
+python3 -c 'import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("0.0.0.0", 50700)); s.settimeout(2)
+s.connect(("198.51.100.1", 8080)); time.sleep(3)' &
+held=$!
+sleep 0.5
+drops=$(stat dropped)
+rst_to 50700 50
+sleep 0.2
+(( $(stat dropped) - drops < 5 )) \
+    || fail "RSTs without ACK on the host's connection were dropped"
+kill "$held" 2> /dev/null; wait "$held" 2> /dev/null || true
+echo "ok - a RST without ACK on the host's connection passes its drop"
 "$CTL" undrop 198.51.100.0/30 > /dev/null
+
+# IPv6: the server dropped too, its echo replies and ICMPv6 errors about
+# the host's flow pass; packet too big about no flow doesn't
+"$CTL" drop 2001:db8::1/128 > /dev/null
+ping -6 -c 1 -W 2 2001:db8::1 > /dev/null \
+    || fail "ping over IPv6 to a dropped server got no reply"
+python3 -c 'import socket
+s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+s.bind(("::", 50510)); s.sendto(b"q", ("2001:db8::1", 9999))'
+sleep 0.5
+passed=$(stat reply_passed)
+drops=$(stat dropped)
+icmp6_err 1 4 17 50510 9999 50
+sleep 0.2
+(( $(stat reply_passed) - passed >= 50 )) \
+    || fail "ICMPv6 errors about the host's flow were not passed as replies"
+(( $(stat dropped) - drops < 5 )) \
+    || fail "ICMPv6 errors about the host's flow were dropped"
+drops=$(stat dropped)
+icmp6_err 2 0 6 50600 443 50
+sleep 0.2
+(( $(stat dropped) - drops >= 50 )) \
+    || fail "packet too big about no flow passed a dropped source"
+"$CTL" undrop 2001:db8::1/128 > /dev/null
+echo "ok - and over IPv6: echo replies, errors about a flow, not without one"
 
 # sw_flowd purged: a voidgate started after that runs without a table,
 # and the download gets its server banned, as without the table
@@ -329,6 +401,8 @@ grep -q "\[CRIT\] .*is not the layout this voidgate reads" "$LOG" \
 "$CTL" status | head -1 \
     | grep -q "^CRITICAL: sw_flowd's flow table under .* is not the layout" \
     || fail "expected status to say the table is of another layout"
+"$CTL" status | head -1 | grep -q "sw_flowd -P" \
+    || fail "expected status to say what to do about another layout"
 rm -f "$PINS/outbound" "$PINS/config"
 echo "ok - a table of another layout is refused"
 

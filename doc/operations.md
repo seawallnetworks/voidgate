@@ -37,8 +37,9 @@ which records the host's outbound flows at TC egress (Seawall proposal
 0015). A reply is TCP with ACK or RST, UDP to an ephemeral port, an echo
 reply, or an ICMP error about a packet the host sent, of a flow in the
 table; a TCP flow the host closed lasts at most 120 s after its FIN,
-10 s after its RST, and `reply_idle_seconds` if that is shorter. A path MTU error about no flow of the host's is not one: it
-costs nothing to forge. voidgate binds that table when it starts, so sw_flowd starts
+10 s after its RST, and `reply_idle_seconds` if that is shorter. A path
+MTU error about no flow of the host's is not one: it costs nothing to
+forge. voidgate binds that table when it starts, so sw_flowd starts
 first (the unit is `After=` and `Wants=sw_flowd.service`). Started
 without it, voidgate judges those replies as any other until it is
 restarted; restarting sw_flowd needs no restart of voidgate, `sw_flowd
@@ -156,7 +157,7 @@ its comments.
 | `allow_ports` | `22` | TCP ports passed on the local side. CSV, at most 8. | reload |
 | `remote_map_size` | `262144` | Cap on tracked sources (LRU, not preallocated). | restart |
 | `drop_map_size` | `65536` | Cap on drop-tree prefixes (not preallocated). | restart |
-| `reply_idle_seconds` | `120` | A flow that has not left for longer is not looked up. | reload |
+| `reply_idle_seconds` | `120` | A flow that has not left for longer is no reply: its packets are judged as any other's. A TCP flow the host closed is one for 120 s after its FIN, 10 s after its RST, at most. | reload |
 | `metrics_port` | `9105` | Prometheus on `127.0.0.1`; `0` disables it. | restart |
 
 The built-in allow list is
@@ -246,7 +247,7 @@ scripts.
 
 | Command | Effect | Typical answer |
 | --- | --- | --- |
-| `status` | State summary; `flows` as in `stats`. Without sw_flowd's table, a first line `CRITICAL: …` says so, until voidgate restarts with it | `state=IDLE armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0 flows=sw_flowd` |
+| `status` | State summary; `flows` as in `stats`. Without sw_flowd's table, a first line `CRITICAL: …` says so, until voidgate restarts with it | `state=idle armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0 flows=sw_flowd` |
 | `stats` | Data-plane counters and rates; `flows` is `sw_flowd` while its table is read, `none` without it, when a `CRITICAL: …` first line says so, as in `status` | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
 | `drops` | Installed prefixes with reason and age | one line per prefix, or `(none)` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
@@ -264,7 +265,7 @@ drops after a restart.
 
 Daily checks:
 
-1. `voidgatectl status`: expect `state=IDLE`, `degraded=0`, the right
+1. `voidgatectl status`: expect `state=idle`, `degraded=0`, the right
    `iface`, `flows=sw_flowd`, and no `CRITICAL` line.
 2. `voidgatectl drops`: review manual drops (reason 1); they never
    expire.
