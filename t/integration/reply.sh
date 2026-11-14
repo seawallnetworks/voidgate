@@ -188,6 +188,18 @@ for _ in range(n):
 PY
 }
 
+# udp_from <sport> <dport> <count>: UDP from the peer's sport to this host
+udp_from() {
+    ip netns exec "$NS" python3 - "$@" <<'PY'
+import socket, sys
+sport, dport, n = map(int, sys.argv[1:])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("198.51.100.1", sport))
+for _ in range(n):
+    s.sendto(b"q", ("198.51.100.10", dport))
+PY
+}
+
 stat() {
     "$CTL" stats | tr ' ' '\n' | sed -n "s/^$1=//p"
 }
@@ -344,6 +356,42 @@ sleep 0.2
     || fail "RSTs without ACK on the host's connection were dropped"
 kill "$held" 2> /dev/null; wait "$held" 2> /dev/null || true
 echo "ok - a RST without ACK on the host's connection passes its drop"
+
+# classic ntpd listens on 123 and queries from it: sw_flowd's
+# record_udp_ports records it, and its server's answers pass the drop;
+# to 124, not listed, they are dropped (Seawall proposal 0015 §7)
+for port in 123 124; do
+    python3 -c "import socket, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('0.0.0.0', $port)); time.sleep(0.6)
+s.sendto(b'q', ('198.51.100.1', 123))"
+done
+sleep 0.3
+passed=$(stat reply_passed)
+drops=$(stat dropped)
+udp_from 123 123 50
+sleep 0.2
+(( $(stat reply_passed) - passed >= 50 )) \
+    || fail "answers to ntpd's queries from 123 were not passed as replies"
+(( $(stat dropped) - drops < 5 )) || fail "answers to ntpd were dropped"
+drops=$(stat dropped)
+udp_from 123 124 50
+sleep 0.2
+(( $(stat dropped) - drops >= 50 )) \
+    || fail "answers to a port not in record_udp_ports passed the drop"
+echo "ok - ntpd's queries from 123 get their answers through a drop; 124's don't"
+
+# DHCP is as before 0015: voidgate passes a server's answers, 67 to 68,
+# before its drop lists, a dropped source's too, counted against the
+# source but no reply (0015 §7)
+drops=$(stat dropped)
+passed=$(stat reply_passed)
+udp_from 67 68 50
+sleep 0.2
+(( $(stat dropped) - drops < 5 )) || fail "DHCP's answers were dropped"
+(( $(stat reply_passed) - passed < 5 )) \
+    || fail "DHCP's answers were passed as replies"
+echo "ok - DHCP's answers pass a drop of their source, as before, not as replies"
 "$CTL" undrop 198.51.100.0/30 > /dev/null
 
 # IPv6: the server dropped too, its echo replies and ICMPv6 errors about
