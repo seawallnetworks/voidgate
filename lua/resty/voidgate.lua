@@ -13,7 +13,8 @@
 -- drop is an operator's decision (voidgatectl drop <cidr>).
 --
 -- M.ban() and M.ban_now() use the ban socket, /run/voidgate-ban.sock
--- (group voidgate_ban), which takes only drops with a ttl. The other
+-- (group voidgate_ban), which takes only one address's drop with a ttl
+-- (a network or a drop without one is refused). The other
 -- methods, through M.new(), use the control socket, /run/voidgate.sock
 -- (group voidgate), the whole protocol.
 

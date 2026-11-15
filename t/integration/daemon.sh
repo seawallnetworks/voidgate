@@ -213,17 +213,20 @@ grep -q 'disarmed (command, socket uid 65534)' "$work/log/voidgate.log"
 [[ $(ro blocks) == "epoch=$epoch seq=304 n=0 next=end" ]]
 stop_daemon
 
-# -B: the ban socket, for its group: drop <cidr> ttl=N only. A drop on
-# an idle gate arms it, both changes the ban client's, source ban.
+# -B: the ban socket, for its group: drop <address> ttl=N only, one
+# address (/32, /128 or bare), never a network. A drop on an idle gate
+# arms it, both changes the ban client's, source ban.
 start_daemon -c ro.conf -g root -R nogroup -B nogroup
 [[ $(stat -c '%a %U %G' /run/voidgate-ban.sock) == '660 root nogroup' ]]
 for command in status stats drops changes blocks arm disarm reload \
     'drop 198.18.0.9/32' 'drop 198.18.0.9/32 ttl=0' \
-    'drop 198.18.0.9/32 ttl=60 x' 'undrop 198.18.0.9/32'; do
+    'drop 198.18.0.9/32 ttl=60 x' 'undrop 198.18.0.9/32' \
+    'drop 198.18.0.0/24 ttl=60' 'drop 0.0.0.0/1 ttl=60' \
+    'drop 2001:db8::/64 ttl=60' 'drop bad ttl=60'; do
     result=0
     as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock $command \
         > ban.out || result=$?
-    [[ $result == 1 && $(< ban.out) == 'error: denied: the ban socket takes only drop <cidr> ttl=<seconds>' ]]
+    [[ $result == 1 && $(< ban.out) == 'error: denied: the ban socket takes only drop <address> ttl=<seconds>' ]]
 done
 [[ $(ro status | tail -1) == state=idle* ]]
 [[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 198.18.0.3/32 ttl=60) == ok ]]
@@ -234,6 +237,10 @@ mapfile -t lines < changes.out
 [[ ${lines[1]} =~ ^seq=1\ time=[0-9]+\ kind=arm\ source=ban\ uid=65534\ cause=ban$ ]]
 [[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=ban\ uid=65534\ id=1\ cidr=198\.18\.0\.3/32\ reason=timed ]]
 grep -q 'armed (ban, ban uid 65534)' "$work/log/voidgate.log"
+# a bare address, and IPv6's /128
+[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 198.18.0.4 ttl=60) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 2001:db8::4/128 ttl=60) == ok ]]
+[[ $(ro blocks | head -1) =~ \ n=3\ next=end$ ]]
 stop_daemon
 [[ ! -e /run/voidgate-ban.sock ]]
 

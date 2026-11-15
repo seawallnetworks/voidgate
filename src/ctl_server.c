@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -84,14 +85,17 @@ static const vg_ctl_command_t  vg_ctl_commands[] = {
 
 
 /*
- * On the ban socket, only "drop <cidr> ttl=<seconds>": a drop whose
- * options are a valid ttl and nothing else. ctl_drop() checks the cidr.
+ * On the ban socket, only "drop <address> ttl=<seconds>": one address,
+ * a /32 or /128 (or bare), and a valid ttl, nothing else. A ban client
+ * bans the clients it saw; a network is an operator's decision, so a
+ * compromised one can't block a whole range.
  */
 static int
 ban_allowed(const vg_ctl_command_t *cmd, const char *args)
 {
-    uint32_t     ttl;
-    const char  *sp;
+    uint32_t         ttl;
+    const char      *sp;
+    struct vg_cidr   p;
 
     if (cmd->handler != ctl_drop) {
         return 0;
@@ -99,7 +103,13 @@ ban_allowed(const vg_ctl_command_t *cmd, const char *args)
 
     sp = strchr(args, ' ');
 
-    return sp != NULL && parse_ttl(sp + 1, &ttl) == 0;
+    if (sp == NULL || parse_ttl(sp + 1, &ttl) != 0
+        || vg_parse_cidr_len(args, (size_t) (sp - args), &p) != 0)
+    {
+        return 0;
+    }
+
+    return p.prefixlen == (p.family == AF_INET6 ? 128 : 32);
 }
 
 
@@ -775,7 +785,7 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int mode)
         if (mode == VG_CTL_BAN && !ban_allowed(cmd, req + len)) {
             snprintf(reply, sizeof(reply),
                      "error: denied: the ban socket takes only "
-                     "drop <cidr> ttl=<seconds>\n");
+                     "drop <address> ttl=<seconds>\n");
             break;
         }
 

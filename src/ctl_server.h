@@ -17,8 +17,8 @@ enum vg_ctl_mode {
     VG_CTL_FULL = 0,    /* the control socket: every command */
     VG_CTL_READ,        /* the read-only socket: status, stats, drops,
                            changes and blocks */
-    VG_CTL_BAN          /* the ban socket: drop <cidr> ttl=N only, its
-                           changes from source "ban" */
+    VG_CTL_BAN          /* the ban socket: drop <address> ttl=N only, one
+                           address; its changes from source "ban" */
 };
 
 /* The caller sets socket timeouts and closes fd after handling. */

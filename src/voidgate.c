@@ -100,7 +100,8 @@ usage(const char *argv0)
             "this group\n"
             "  -B group  also listen on " VG_BAN_SOCK_PATH ", for this "
             "group:\n"
-            "            drop <cidr> ttl=<seconds> only, for ban clients\n",
+            "            drop <address> ttl=<seconds> only (a /32 or /128),\n"
+            "            for ban clients\n",
             argv0);
 }
 
