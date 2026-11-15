@@ -213,15 +213,26 @@ nginx workers do not run as root. `M.ban()` and `M.ban_now()` talk to
 the ban socket, `/run/voidgate-ban.sock` (Seawall proposal 0012 §2),
 which the shipped unit opens with `-B voidgate_ban`: `0660
 root:voidgate_ban`, the group from the seawall repo, which `make
-install` needs first. It takes only `drop <cidr> ttl=<seconds>`, and
-refuses everything else (`error: denied: ...`): a gateway or an
-application server that faces the internet, if compromised, can add
-blocks that expire, and can't disarm the gate, reload it or lift a
-block. Add the workers' user to the group and restart the gateway:
+install` needs first. It takes only `drop <address> ttl=<seconds>`,
+one address (`/32`, `/128` or bare, never a network), and refuses
+everything else (`error: denied: ...`): a gateway or an application
+server that faces the internet, if compromised, can block single
+addresses for a while, and can't block a range, disarm the gate,
+reload it or lift a block. Add the workers' user to the group and
+restart the gateway:
 
 ```sh
 sudo usermod -aG voidgate_ban kong
 ```
+
+**Upgrading from a voidgate without the ban socket:** `M.ban()` and
+`M.ban_now()` used `/run/voidgate.sock`, and the workers' user was told
+to join `voidgate`. They now use the ban socket: until that user joins
+`voidgate_ban`, every ban fails, with only a line in nginx's error log
+(`voidgate: drop ...: permission denied`). Add it to `voidgate_ban`,
+restart the gateway, then take it out of `voidgate`
+(`sudo gpasswd -d kong voidgate`) unless it also calls the other
+methods, which need the control socket.
 
 An application banning directly, not through a gateway, joins the same
 group. Its changes are `source=ban` with its uid, so several ban

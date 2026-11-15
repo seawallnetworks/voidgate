@@ -397,11 +397,17 @@ OpenResty. For another OpenResty, Kong or APISIX, set
 
 ## 10. Socket access
 
-The socket is created `0660 root:root`. voidgate's `-g group` `chown`s it
-to that group after `bind`, so gateway workers can connect. The shipped
-unit passes `-g voidgate`, a group the seawall repo declares: the
-workers' user joins it
-(`usermod -aG voidgate kong`), or `-g` names the workers' own group.
+The bridge bans through `M.ban()`, which uses the ban socket,
+`/run/voidgate-ban.sock` (Seawall proposal 0012 §2): it takes only
+`drop <address> ttl=<seconds>`, one address, so a compromised gateway
+can't block a range, disarm the gate or lift a block. The socket is
+created `0600`; voidgate's `-B group` `chown`s it to that group after
+`bind` and opens it `0660`, so gateway workers can connect. The shipped
+unit passes `-B voidgate_ban`, a group the seawall repo declares: the
+workers' user joins it (`usermod -aG voidgate_ban kong`), or `-B` names
+the workers' own group. The control socket, `/run/voidgate.sock`
+(`-g voidgate`), is not for gateways: its members get the whole
+protocol.
 
 | Gateway | Common worker user, group | Set by |
 |---|---|---|

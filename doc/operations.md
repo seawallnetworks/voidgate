@@ -120,11 +120,22 @@ default with `interface` set to the default route's NIC (`ens5` on EC2,
 typically `eth0` elsewhere). It never touches an existing config, and
 neither does `make install` nor `make uninstall`.
 
-To let a gateway or service use the control socket, add its worker user
-to the group `voidgate` and restart that service:
-`sudo usermod -aG voidgate kong`. Members get the whole protocol,
-`disarm` and `reload` included, so do not add a shared user such as
-`nobody`.
+A gateway or an application that bans through `voidgate.lua`
+(`M.ban()`, `M.ban_now()`) uses the ban socket, `/run/voidgate-ban.sock`
+(`-B voidgate_ban`): add its worker user to the group `voidgate_ban` and
+restart that service: `sudo usermod -aG voidgate_ban kong`. The ban
+socket takes only `drop <address> ttl=<seconds>`, one address: members
+can block single addresses for a while, nothing else.
+
+The control socket, `/run/voidgate.sock` (`-g voidgate`), is for
+operators and sw_configd. Members of `voidgate` get the whole protocol,
+`disarm` and `reload` included, so add only a program that needs it,
+never a shared user such as `nobody`.
+
+Upgrading from a voidgate without the ban socket: a gateway's user that
+joined `voidgate` can't reach the ban socket, and every ban fails, with
+only a line in nginx's error log. Add it to `voidgate_ban`, restart the
+gateway, then `sudo gpasswd -d kong voidgate`.
 
 ## 3. Configuration
 
@@ -437,6 +448,8 @@ there.
 | `degraded=1`, `hook=tc` or `tcx` | A non-libxdp program holds the XDP hook (`ip link`, Cilium) | Move that program to libxdp, or accept TC; `hook = xdp` makes this fatal instead |
 | `XDP attach: no bpffs at /sys/fs/bpf` | bpffs not mounted | `mount -t bpf bpf /sys/fs/bpf` |
 | `voidgatectl: connect /run/voidgate.sock: Permission denied` | Caller not root and not in group `voidgate` | `usermod -aG voidgate <user>`, then restart that service |
+| nginx: `voidgate: drop …: permission denied` | The workers' user is not in `voidgate_ban` (after an upgrade: it was in `voidgate`) | `usermod -aG voidgate_ban <user>`, then restart the gateway |
+| `error: denied: the ban socket takes only drop <address> ttl=<seconds>` | A network, a drop without a ttl, or another command on the ban socket | Ban one address with a ttl; a network or anything else goes through the control socket |
 | `voidgatectl: connect …: No such file or directory` | Daemon down | Start voidgate; read the log |
 | `voidgatectl: connect …: timed out` | voidgate stopped answering (5 s) | `systemctl status voidgate`; read the log |
 | `control socket /run/voidgate.sock: no group "voidgate" in /etc/group` | seawall not installed | Install seawall, or drop `-g voidgate` with `systemctl edit voidgate` |
