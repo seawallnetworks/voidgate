@@ -37,6 +37,9 @@
 #define VG_XDP_HELD  1      /* a program, not libxdp's dispatcher */
 #define VG_XDP_SHARED  2    /* libxdp's dispatcher */
 
+/* looks at the hook again when it was taken between a look and the attach */
+#define VG_XDP_TRIES  5
+
 
 static void bump_memlock(void);
 static int skel_open(struct vg_maps *m, const struct vg_config *cfg);
@@ -235,9 +238,9 @@ vg_maps_close(struct vg_maps *m)
 int
 vg_attach(struct vg_maps *m, const struct vg_config *cfg)
 {
-    enum xdp_attach_mode mode, shared_mode = XDP_MODE_UNSPEC;
+    enum xdp_attach_mode mode, try_mode, shared_mode = XDP_MODE_UNSPEC;
     char holder[BPF_OBJ_NAME_LEN];
-    int automode, held, err;
+    int automode, try_auto, held, err, tries;
 
     if (m->skel == NULL) {
         sw_log_warn("attach: BPF object not open");
@@ -288,27 +291,34 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
         return -1;
     }
 
-    held = xdp_claim(m->ifindex, holder, sizeof(holder), &shared_mode);
+    for (tries = 1; ; tries++) {
+        held = xdp_claim(m->ifindex, holder, sizeof(holder), &shared_mode);
 
-    if (held < 0) {
-        sw_log_warn("XDP attach: reading ifindex %d's XDP programs: %s",
-                    m->ifindex, strerror(-held));
-        return -1;
-    }
+        if (held < 0) {
+            sw_log_warn("XDP attach: reading ifindex %d's XDP programs: %s",
+                        m->ifindex, strerror(-held));
+            return -1;
+        }
 
-    /* a dispatcher has one mode, which joining it keeps */
-    if (held == VG_XDP_SHARED && automode) {
-        mode = shared_mode;
-        automode = 0;
-    }
+        if (held == VG_XDP_HELD) {
+            break;
+        }
 
-    if (held != VG_XDP_HELD) {
-        err = attach_xdp(m, cfg, mode);
+        /* a dispatcher has one mode, which joining it keeps */
+        try_mode = mode;
+        try_auto = automode;
+
+        if (held == VG_XDP_SHARED && automode) {
+            try_mode = shared_mode;
+            try_auto = 0;
+        }
+
+        err = attach_xdp(m, cfg, try_mode);
 
         /* A driver may have native XDP and still refuse it: ENA, say, at
          * an MTU over 3498.
          */
-        if (err && automode && err != -EBUSY && err != -EEXIST) {
+        if (err && try_auto && err != -EBUSY && err != -EEXIST) {
             sw_log_warn("native XDP attach failed (%s), falling back to skb",
                         strerror(-err));
             err = attach_xdp(m, cfg, XDP_MODE_SKB);
@@ -318,13 +328,25 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
             return 0;
         }
 
-        /* attached between xdp_claim() and here */
         if (err != -EBUSY && err != -EEXIST) {
             sw_log_warn("XDP attach failed: %s", strerror(-err));
             return -1;
         }
 
-        snprintf(holder, sizeof(holder), "another program");
+        /*
+         * Taken between xdp_claim() and the attach. Most likely by another
+         * libxdp user making its dispatcher, mini-fw starting with this
+         * voidgate, which this one joins: look again. Only a program that
+         * isn't a dispatcher sends voidgate to TC.
+         */
+        if (tries == VG_XDP_TRIES) {
+            snprintf(holder, sizeof(holder), "another program");
+            break;
+        }
+
+        sw_log_info("ifindex %d's XDP hook was taken meanwhile: looking again",
+                    m->ifindex);
+        usleep(100000);
     }
 
     if (strcmp(cfg->hook, "xdp") == 0) {

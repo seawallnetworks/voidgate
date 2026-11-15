@@ -134,6 +134,28 @@ xdp-loader status test0 | grep -q 'xdpfilt_'
 xdp-filter unload test0 --all
 [[ -z $(xdp_id) ]]
 
+# Both start at once, as voidgate and mini-fw can at boot: whichever
+# makes the dispatcher, the other joins it. A hook taken between
+# voidgate's look and its attach is looked at again, not given up for
+# TC. The other one starts a little later each time, across voidgate's
+# start.
+for attempt in $(seq 20); do
+    delay=$(printf '0.%03d' $((attempt * 40)))
+    ( sleep "$delay"; xdp-filter load -m skb test0 ) &
+    filter=$!
+    start_daemon -c base.conf
+    wait "$filter" || true
+    if [[ $(status) != *' hook=xdp-skb degraded=0 '* ]]; then
+        echo "both at once, xdp-filter after ${delay}s: voidgate degraded" >&2
+        status >&2
+        false
+    fi
+    [[ $(in_dispatcher) == 1 ]]
+    stop_daemon
+    xdp-filter unload test0 --all 2>/dev/null || true
+    [[ -z $(xdp_id) ]]
+done
+
 # Another program holds the hook: it stays, and voidgate goes to tcx.
 ip link set dev test0 xdpgeneric obj pass.bpf.o sec xdp
 customer=$(xdp_id)
