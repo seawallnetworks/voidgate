@@ -781,7 +781,7 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int mode)
             break;
         }
 
-        /* the ban socket: blocks that expire, nothing else */
+        /* the ban socket: one address's block that expires, nothing else */
         if (mode == VG_CTL_BAN && !ban_allowed(cmd, req + len)) {
             snprintf(reply, sizeof(reply),
                      "error: denied: the ban socket takes only "
