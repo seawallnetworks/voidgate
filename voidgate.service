@@ -18,7 +18,7 @@ ExecStartPre=+/usr/local/seawall/libexec/voidgate-mkconf
 # as sw_configd, may connect, with the whole protocol. For root alone,
 # drop -g with "systemctl edit voidgate". In the foreground (no -d) it
 # logs to stderr, the journal; log_file is for -d.
-ExecStart=/usr/local/seawall/sbin/voidgate -c /usr/local/seawall/etc/voidgate/voidgate.conf -g voidgate
+ExecStart=/usr/local/seawall/sbin/voidgate -c /usr/local/seawall/etc/voidgate/voidgate.conf -g voidgate -R sw_monitor
 Restart=on-failure
 RestartSec=2
 AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_PERFMON CAP_SYS_ADMIN

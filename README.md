@@ -142,6 +142,46 @@ degraded, and `voidgatectl status` says `degraded=1`, with `hook=tcx`
 or `hook=tc` (`xdp-native` or `xdp-skb` at XDP). `hook = xdp` in the
 config fails instead, `hook = tc` always takes TC.
 
+## The read-only socket
+
+Monitoring reads the gate without being able to change it (Seawall
+proposal 0012 §2). `-R <group>` opens `/run/voidgate-monitor.sock`,
+`0660 root:<group>`; the shipped unit runs `-R sw_monitor`. It answers
+`status`, `stats`, `drops`, `changes` and `blocks`, and every other
+command with `error: read-only socket`. The control socket answers all
+of them.
+
+```sh
+voidgatectl -s /run/voidgate-monitor.sock changes
+```
+
+- `changes` gives the cursor; `changes <epoch> <seq>` every change after
+  it, oldest first: blocks added and lifted, arm, disarm and reload.
+
+  ```
+  epoch=9f2c41d07a6be3e1 seq=3 oldest=1 gap=0 n=2 more=0
+  seq=2 time=1763150000123 kind=arm source=socket uid=0 cause=manual-drop
+  seq=3 time=1763150000123 kind=block source=socket uid=0 id=1 cidr=198.18.0.1/32 reason=manual expires=0
+  ```
+
+  `source=socket` is a command on the control socket, with the caller's
+  uid (`SO_PEERCRED`); a change the command causes, such as the arm before
+  a manual drop, is the caller's too. `source=self` is voidgate's own:
+  the wake threshold, policy and aggregate drops, timed lifts (`cause=
+  expired`). `disarm` lifts every block, in one change. `more=1`: read
+  again from the last seq.
+- The epoch is drawn at each start; a reload keeps it. A cursor of
+  another epoch, older than the last 8192 changes, or not reached yet, is
+  a gap (`gap=1`, no changes): read the blocks back, and carry on from
+  that reply's seq.
+- `blocks`, then `blocks after <next>` until `next=end`: every listed
+  block, 256 a page, oldest first by id (ids only grow).
+
+  ```
+  epoch=9f2c41d07a6be3e1 seq=3 n=1 next=end
+  id=1 cidr=198.18.0.1/32 reason=manual inserted=1763150000 expires=0
+  ```
+
 ## OpenResty integration
 
 voidgate is not a WAF. Let OpenResty, or a gateway built on it such as Kong

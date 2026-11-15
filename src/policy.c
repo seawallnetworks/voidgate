@@ -9,7 +9,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
+#include <unistd.h>
 
 
 struct vg_snap_ent {
@@ -43,11 +45,15 @@ static void remote_cb(int family, const uint8_t *addr,
     const struct host_counters *sum, void *arg);
 static void walk_remotes(struct vg_ctrl *c, double dt);
 static void expire_drops(struct vg_ctrl *c);
-static const char *reason_name(uint32_t reason);
 static void logged_list(char *out, size_t size,
     const struct vg_logged_drop *v, int n);
 static void log_drops(struct vg_ctrl *c);
 static double tick_dt(struct vg_ctrl *c);
+static uint64_t draw_epoch(void);
+static struct vg_change *change_add(struct vg_ctrl *c, int kind,
+    const char *cause);
+static void change_block(struct vg_ctrl *c, int kind, const char *cause,
+    const struct vg_drop_rec *r, uint64_t id);
 
 
 static unsigned
@@ -209,6 +215,20 @@ vg_ctrl_init(struct vg_ctrl *c, struct vg_config *cfg,
         return -1;
     }
 
+    c->changes = calloc(VG_CHANGES, sizeof(*c->changes));
+
+    if (c->changes == NULL) {
+        free(c->drop_pool);
+        free(c->drop_heads);
+        free(c->snap_pool);
+        c->drop_pool = NULL;
+        c->drop_heads = NULL;
+        c->snap_pool = NULL;
+        return -1;
+    }
+
+    c->epoch = draw_epoch();
+
     snap_reset_pool(c);
 
     if (cfg_path != NULL) {
@@ -234,6 +254,157 @@ vg_ctrl_free(struct vg_ctrl *c)
     c->snap_pool = NULL;
     c->snap_free = NULL;
     c->snap_cap = 0;
+    free(c->changes);
+    c->changes = NULL;
+}
+
+
+/* Random, so a restarted voidgate's sequence numbers, which start again,
+ * are never taken for the old ones; never 0.
+ */
+static uint64_t
+draw_epoch(void)
+{
+    uint64_t         e = 0;
+    struct timespec  ts;
+
+    if (getrandom(&e, sizeof(e), 0) != (ssize_t) sizeof(e)) {
+        clock_gettime(CLOCK_REALTIME, &ts);
+        e = ((uint64_t) ts.tv_sec << 32) ^ (uint64_t) ts.tv_nsec
+            ^ ((uint64_t) getpid() << 16);
+    }
+
+    return e != 0 ? e : 1;
+}
+
+
+/* The next change, its source the caller's; cause is copied with its
+ * spaces as "-", so it stays one word on the protocol's lines.
+ */
+static struct vg_change *
+change_add(struct vg_ctrl *c, int kind, const char *cause)
+{
+    size_t             i;
+    struct timespec    ts;
+    struct vg_change  *ch;
+
+    if (c->changes == NULL) {
+        return NULL;
+    }
+
+    ch = &c->changes[++c->seq % VG_CHANGES];
+    memset(ch, 0, sizeof(*ch));
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ch->seq = c->seq;
+    ch->time_ms = (uint64_t) ts.tv_sec * 1000
+                  + (uint64_t) ts.tv_nsec / 1000000;
+    ch->kind = (uint8_t) kind;
+    ch->socket = (uint8_t) c->caller_socket;
+    ch->uid = c->caller_uid;
+
+    for (i = 0; cause != NULL && cause[i] != '\0'
+                && i < sizeof(ch->cause) - 1; i++)
+    {
+        ch->cause[i] = cause[i] == ' ' ? '-' : cause[i];
+    }
+
+    return ch;
+}
+
+
+/* A block or unblock of r; id is r's (an unblock's is read before the
+ * lift clears it).
+ */
+static void
+change_block(struct vg_ctrl *c, int kind, const char *cause,
+    const struct vg_drop_rec *r, uint64_t id)
+{
+    struct vg_change  *ch;
+
+    ch = change_add(c, kind, cause);
+
+    if (ch != NULL) {
+        ch->id = id;
+        ch->cidr = r->cidr;
+        ch->reason = r->reason;
+        ch->expires = r->reason == VG_REASON_TIMED ? r->expires : 0;
+    }
+}
+
+
+void
+vg_ctrl_caller(struct vg_ctrl *c, int socket, uint32_t uid)
+{
+    c->caller_socket = socket;
+    c->caller_uid = socket ? uid : 0;
+}
+
+
+void
+vg_ctrl_reloaded(struct vg_ctrl *c)
+{
+    (void) change_add(c, VG_CHANGE_RELOAD, "reload");
+}
+
+
+const struct vg_change *
+vg_ctrl_change(const struct vg_ctrl *c, uint64_t seq)
+{
+    const struct vg_change  *ch;
+
+    if (c->changes == NULL || seq == 0 || seq > c->seq) {
+        return NULL;
+    }
+
+    ch = &c->changes[seq % VG_CHANGES];
+
+    return ch->seq == seq ? ch : NULL;
+}
+
+
+uint64_t
+vg_ctrl_changes_oldest(const struct vg_ctrl *c)
+{
+    return c->seq >= VG_CHANGES ? c->seq - VG_CHANGES + 1 : 1;
+}
+
+
+/* The page's last record is kept as a hint: the next page starts after it
+ * at once while it is still listed, instead of walking from the oldest.
+ */
+const struct vg_drop_rec *
+vg_ctrl_block_after(struct vg_ctrl *c, uint64_t after)
+{
+    struct vg_list      *l;
+    struct vg_drop_rec  *r;
+
+    if (after != 0 && c->page_hint != NULL && c->page_hint->id == after) {
+        return vg_ctrl_block_next(c, c->page_hint);
+    }
+
+    for (l = c->drop_all.next; l != &c->drop_all; l = l->next) {
+        r = vg_list_entry(l, struct vg_drop_rec, all);
+
+        if (r->id > after) {
+            return r;
+        }
+    }
+
+    return NULL;
+}
+
+
+const struct vg_drop_rec *
+vg_ctrl_block_next(struct vg_ctrl *c, const struct vg_drop_rec *r)
+{
+    c->page_hint = (struct vg_drop_rec *) r;
+
+    if (r->all.next == &c->drop_all) {
+        return NULL;
+    }
+
+    return vg_list_entry(r->all.next, struct vg_drop_rec, all);
 }
 
 
@@ -311,6 +482,7 @@ drops_reset(struct vg_ctrl *c)
     vg_list_init(&c->drop_all);
     c->drop_used = 0;
     c->drop_count = 0;
+    c->page_hint = NULL;
 }
 
 
@@ -334,6 +506,11 @@ drop_remove(struct vg_ctrl *c, struct vg_drop_rec *r)
     vg_list_del(&r->all);
     vg_list_add_tail(&r->all, &c->drop_free);
     c->drop_count--;
+    r->id = 0;
+
+    if (c->page_hint == r) {
+        c->page_hint = NULL;
+    }
 
     return 0;
 }
@@ -370,9 +547,12 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
     if (r == NULL) {
         r = drop_alloc(c);
 
+        /* Summed into one line per tick, by log_drops(): a large attack
+         * refuses thousands.
+         */
         if (r == NULL) {
-            sw_log_warn("drop %s refused: drop list full (%u)", buf,
-                        c->drop_pool_cap);
+            sw_log_debug("drop %s refused: drop list full", buf);
+            c->refused_full++;
             return -1;
         }
 
@@ -386,9 +566,11 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         r->reason = reason;
         r->inserted = now;
         r->expires = expires;
+        r->id = ++c->drop_ids;
         vg_hlist_add_head(&r->hash, &c->drop_heads[drop_hash(c, p)]);
         vg_list_add_tail(&r->all, &c->drop_all);
         c->drop_count++;
+        change_block(c, VG_CHANGE_BLOCK, NULL, r, r->id);
 
     } else {
 
@@ -415,10 +597,11 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
             r->reason = reason;
             r->inserted = now;
             r->expires = expires;
+            change_block(c, VG_CHANGE_BLOCK, NULL, r, r->id);
         }
     }
 
-    sw_log_debug("drop %s (%s)%s", buf, reason_name(reason),
+    sw_log_debug("drop %s (%s)%s", buf, vg_reason_name(reason),
                  again ? " again" : "");
 
     if (again) {
@@ -456,15 +639,20 @@ int
 vg_ctrl_undrop(struct vg_ctrl *c, const struct vg_cidr *p)
 {
     char buf[80];
+    uint64_t id;
     struct vg_drop_rec *r = drops_find(c, p);
 
     log_drops(c);
     vg_cidr_to_str(p, buf, sizeof(buf));
 
     if (r != NULL) {
+        id = r->id;
+
         if (drop_remove(c, r) < 0) {
             return -1;
         }
+
+        change_block(c, VG_CHANGE_UNBLOCK, "undrop", r, id);
 
     /* Not listed: still clear a stray map entry. */
     } else if (vg_drop_del(c->maps, p) < 0 && errno != ENOENT) {
@@ -487,6 +675,7 @@ int
 vg_ctrl_prune_protected(struct vg_ctrl *c)
 {
     char buf[80];
+    uint64_t id;
     struct vg_list *l, *next;
     struct vg_drop_rec *r;
     int n = 0;
@@ -503,7 +692,10 @@ vg_ctrl_prune_protected(struct vg_ctrl *c)
         vg_cidr_to_str(&r->cidr, buf, sizeof(buf));
         sw_log_warn("reload: undrop %s (now covers local/allow)", buf);
 
+        id = r->id;
+
         if (drop_remove(c, r) == 0) {
+            change_block(c, VG_CHANGE_UNBLOCK, "reload", r, id);
             n++;
         }
     }
@@ -528,7 +720,15 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
     }
 
     c->state = VG_ACTIVE;
-    sw_log_info("armed (%s)", why != NULL ? why : "");
+    (void) change_add(c, VG_CHANGE_ARM, why);
+
+    if (c->caller_socket) {
+        sw_log_info("armed (%s, socket uid %u)", why != NULL ? why : "",
+                    c->caller_uid);
+
+    } else {
+        sw_log_info("armed (%s)", why != NULL ? why : "");
+    }
 
     return 0;
 }
@@ -548,7 +748,15 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
 
     c->state = VG_IDLE;
     c->quiet_since = 0;
-    sw_log_info("disarmed (%s)", why != NULL ? why : "");
+    (void) change_add(c, VG_CHANGE_DISARM, why);
+
+    if (c->caller_socket) {
+        sw_log_info("disarmed (%s, socket uid %u)", why != NULL ? why : "",
+                    c->caller_uid);
+
+    } else {
+        sw_log_info("disarmed (%s)", why != NULL ? why : "");
+    }
 
     return 0;
 }
@@ -702,6 +910,7 @@ static void
 expire_drops(struct vg_ctrl *c)
 {
     time_t now = time(NULL);
+    uint64_t id;
     struct vg_list *l, *next;
     struct vg_drop_rec *r;
     char buf[80], list[VG_LOG_CIDRS * 64];
@@ -726,13 +935,17 @@ expire_drops(struct vg_ctrl *c)
         }
 
         /* A failed lift keeps r listed; the next tick retries it. */
+        id = r->id;
+
         if (drop_remove(c, r) < 0) {
             continue;
         }
 
+        change_block(c, VG_CHANGE_UNBLOCK, "expired", r, id);
+
         if (sw_log_enabled(SW_LOG_DEBUG)) {
             vg_cidr_to_str(&r->cidr, buf, sizeof(buf));
-            sw_log_debug("expire %s (%s)", buf, reason_name(r->reason));
+            sw_log_debug("expire %s (%s)", buf, vg_reason_name(r->reason));
         }
 
         by[r->reason <= VG_REASON_TIMED ? r->reason : 0]++;
@@ -757,8 +970,8 @@ expire_drops(struct vg_ctrl *c)
 }
 
 
-static const char *
-reason_name(uint32_t reason)
+const char *
+vg_reason_name(uint32_t reason)
 {
     switch (reason) {
     case VG_REASON_MANUAL:
@@ -790,7 +1003,7 @@ logged_list(char *out, size_t size, const struct vg_logged_drop *v, int n)
     for (i = 0; i < n && i < VG_LOG_CIDRS; i++) {
         vg_cidr_to_str(&v[i].cidr, buf, sizeof(buf));
         w = snprintf(out + used, size - used, "%s%s (%s)", i ? ", " : "",
-                     buf, reason_name(v[i].reason));
+                     buf, vg_reason_name(v[i].reason));
 
         if (w < 0 || (size_t) w >= size - used) {
             break;
@@ -845,9 +1058,15 @@ log_drops(struct vg_ctrl *c)
         }
     }
 
+    if (c->refused_full > 0) {
+        sw_log_warn("refused %d drop%s: drop list full (%u)", c->refused_full,
+                    c->refused_full == 1 ? "" : "s", c->drop_pool_cap);
+    }
+
     memset(c->drops_new, 0, sizeof(c->drops_new));
     c->drops_again = 0;
     c->drops_shown_n = 0;
+    c->refused_full = 0;
 }
 
 

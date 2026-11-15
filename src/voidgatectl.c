@@ -19,19 +19,29 @@ int
 main(int argc, char **argv)
 {
     char cmd[256], buf[8192], err[256];
-    int fd, i, failed = 0, replied = 0;
+    int fd, i, first = 1, failed = 0, replied = 0;
     ssize_t n;
+    const char *path = VG_SOCK_PATH;
 
-    if (argc < 2) {
-        fprintf(stderr, "usage: voidgatectl status|stats|drops|arm|"
-                "disarm|drop <cidr> [ttl=<sec>]|undrop <cidr>|reload\n");
+    /* -s: another socket, such as the read-only one */
+    if (argc > 2 && strcmp(argv[1], "-s") == 0) {
+        path = argv[2];
+        first = 3;
+    }
+
+    if (argc < first + 1) {
+        fprintf(stderr, "usage: voidgatectl [-s socket] status|stats|drops|"
+                "arm|disarm|drop <cidr> [ttl=<sec>]|undrop <cidr>|reload|\n"
+                "       changes [<epoch> <seq>]|blocks [after <id>]\n"
+                "  -s  default " VG_SOCK_PATH "; read-only: "
+                VG_MONITOR_SOCK_PATH "\n");
         return 1;
     }
 
     cmd[0] = 0;
 
-    for (i = 1; i < argc; i++) {
-        if (i > 1) {
+    for (i = first; i < argc; i++) {
+        if (i > first) {
             strncat(cmd, " ", sizeof(cmd) - strlen(cmd) - 1);
         }
 
@@ -40,7 +50,7 @@ main(int argc, char **argv)
 
     strncat(cmd, "\n", sizeof(cmd) - strlen(cmd) - 1);
 
-    fd = sw_sock_connect_unix(VG_SOCK_PATH, VG_CTL_TIMEOUT_MS, err,
+    fd = sw_sock_connect_unix(path, VG_CTL_TIMEOUT_MS, err,
                               sizeof(err));
 
     if (fd < 0) {

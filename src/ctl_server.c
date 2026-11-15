@@ -10,13 +10,21 @@
 #include <sw/sock.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
 
 #define VG_MAX_DROP_TTL  31536000     /* one year */
+
+/* A reply's room: the commands of old keep theirs, which the Lua client's
+ * "drops" was written for; a page of changes or blocks gets more.
+ */
+#define VG_REPLY_SIZE       8192
+#define VG_PAGE_REPLY_SIZE  65536
 
 
 typedef void (*vg_ctl_handler_pt)(struct vg_ctrl *ctrl, const char *args,
@@ -26,6 +34,8 @@ typedef void (*vg_ctl_handler_pt)(struct vg_ctrl *ctrl, const char *args,
 typedef struct {
     const char         *name;
     int                 prefix;
+    int                 read;       /* also on the read-only socket */
+    int                 page;       /* VG_PAGE_REPLY_SIZE */
     vg_ctl_handler_pt   handler;
 } vg_ctl_command_t;
 
@@ -50,17 +60,25 @@ static int parse_ttl(const char *s, uint32_t *out);
 static int vg_ctrl_reload(struct vg_ctrl *c);
 static void ctl_reload(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
+static void ctl_changes(struct vg_ctrl *ctrl, const char *args,
+    char *reply, size_t reply_size);
+static int change_line(const struct vg_change *ch, char *out, size_t size);
+static void ctl_blocks(struct vg_ctrl *ctrl, const char *args,
+    char *reply, size_t reply_size);
+static int parse_u64(const char *s, int base, uint64_t *out);
 
 
 static const vg_ctl_command_t  vg_ctl_commands[] = {
-    { "status",  0, ctl_status },
-    { "stats",   0, ctl_stats },
-    { "drops",   0, ctl_drops },
-    { "arm",     0, ctl_arm },
-    { "disarm",  0, ctl_disarm },
-    { "drop ",   1, ctl_drop },
-    { "undrop ", 1, ctl_undrop },
-    { "reload",  0, ctl_reload }
+    { "status",   0, 1, 0, ctl_status },
+    { "stats",    0, 1, 0, ctl_stats },
+    { "drops",    0, 1, 0, ctl_drops },
+    { "changes",  1, 1, 1, ctl_changes },
+    { "blocks",   1, 1, 1, ctl_blocks },
+    { "arm",      0, 0, 0, ctl_arm },
+    { "disarm",   0, 0, 0, ctl_disarm },
+    { "drop ",    1, 0, 0, ctl_drop },
+    { "undrop ",  1, 0, 0, ctl_undrop },
+    { "reload",   0, 0, 0, ctl_reload }
 };
 
 
@@ -185,7 +203,7 @@ static void
 ctl_arm(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
-    if (vg_ctrl_arm(ctrl, "ctl") < 0) {
+    if (vg_ctrl_arm(ctrl, "command") < 0) {
         snprintf(reply, reply_size, "error: arm failed\n");
 
     } else {
@@ -198,7 +216,7 @@ static void
 ctl_disarm(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
-    if (vg_ctrl_disarm(ctrl, "ctl") < 0) {
+    if (vg_ctrl_disarm(ctrl, "command") < 0) {
         snprintf(reply, reply_size, "error: disarm failed\n");
 
     } else {
@@ -372,14 +390,281 @@ ctl_reload(struct vg_ctrl *ctrl, const char *args, char *reply,
         snprintf(reply, reply_size, "error: reload failed\n");
 
     } else {
+        vg_ctrl_reloaded(ctrl);
         snprintf(reply, reply_size, "ok\n");
     }
 }
 
 
+/*
+ * "changes" alone: the cursor, to start from.
+ * "changes <epoch> <seq>": the changes after seq, oldest first, as many as
+ * fit; "more=1" if there are others after them. A cursor of another
+ * epoch (voidgate restarted), older than the changes kept, or past the
+ * last one is a gap: none are sent, and the reader reads the blocks back
+ * and carries on from the seq in this reply.
+ *
+ *   epoch=<16 hex> seq=<last> oldest=<seq> gap=0|1 n=<lines> more=0|1
+ *   seq=N time=<Unix ms> kind=block|unblock|arm|disarm|reload
+ *       source=self|socket [uid=N] [cause=W] [id=N cidr=C reason=R
+ *       expires=<Unix s, 0 if none>]
+ */
+static void
+ctl_changes(struct vg_ctrl *ctrl, const char *args, char *reply,
+    size_t reply_size)
+{
+    int                      w, gap, more;
+    char                    *body, line[256], e[24];
+    size_t                   used, n, len;
+    uint64_t                 epoch, from, s, oldest;
+    const char              *sp;
+    const struct vg_change  *ch;
+
+    oldest = vg_ctrl_changes_oldest(ctrl);
+    gap = 0;
+    more = 0;
+    n = 0;
+    from = ctrl->seq + 1;
+
+    if (*args == '\0') {
+        goto header;
+    }
+
+    sp = *args == ' ' ? strchr(args + 1, ' ') : NULL;
+
+    if (sp == NULL || parse_u64(sp + 1, 10, &from) < 0) {
+        snprintf(reply, reply_size, "error: usage: changes <epoch> <seq>\n");
+        return;
+    }
+
+    len = (size_t) (sp - (args + 1));
+
+    if (len == 0 || len >= sizeof(e)) {
+        snprintf(reply, reply_size, "error: bad epoch\n");
+        return;
+    }
+
+    memcpy(e, args + 1, len);
+    e[len] = '\0';
+
+    if (parse_u64(e, 16, &epoch) < 0) {
+        snprintf(reply, reply_size, "error: bad epoch\n");
+        return;
+    }
+
+    if (epoch != ctrl->epoch || from > ctrl->seq || from + 1 < oldest) {
+        gap = 1;
+        from = ctrl->seq + 1;
+
+    } else {
+        from++;
+    }
+
+header:
+
+    body = malloc(reply_size);
+
+    if (body == NULL) {
+        snprintf(reply, reply_size, "error: out of memory\n");
+        return;
+    }
+
+    used = 0;
+
+    /* room for the header, at most 80 bytes */
+    for (s = from; s <= ctrl->seq; s++) {
+        ch = vg_ctrl_change(ctrl, s);
+
+        if (ch == NULL) {
+            continue;
+        }
+
+        w = change_line(ch, line, sizeof(line));
+
+        if (used + (size_t) w + 80 >= reply_size) {
+            more = 1;
+            break;
+        }
+
+        memcpy(body + used, line, (size_t) w);
+        used += (size_t) w;
+        n++;
+    }
+
+    w = snprintf(reply, reply_size, "epoch=%016" PRIx64 " seq=%" PRIu64
+                 " oldest=%" PRIu64 " gap=%d n=%zu more=%d\n",
+                 ctrl->epoch, ctrl->seq, oldest, gap, n, more);
+
+    memcpy(reply + w, body, used);
+    reply[w + used] = '\0';
+    free(body);
+}
+
+
+static int
+change_line(const struct vg_change *ch, char *out, size_t size)
+{
+    static const char  *kinds[] = {
+        "block", "unblock", "arm", "disarm", "reload"
+    };
+
+    int   w, n;
+    char  cidr[80], uid[24], cause[40];
+
+    uid[0] = '\0';
+    cause[0] = '\0';
+
+    if (ch->socket) {
+        snprintf(uid, sizeof(uid), " uid=%u", ch->uid);
+    }
+
+    if (ch->cause[0] != '\0') {
+        snprintf(cause, sizeof(cause), " cause=%s", ch->cause);
+    }
+
+    w = snprintf(out, size, "seq=%" PRIu64 " time=%" PRIu64 " kind=%s "
+                 "source=%s%s%s", ch->seq, ch->time_ms,
+                 ch->kind < sizeof(kinds) / sizeof(kinds[0])
+                 ? kinds[ch->kind] : "unknown",
+                 ch->socket ? "socket" : "self", uid, cause);
+
+    if (ch->kind == VG_CHANGE_BLOCK || ch->kind == VG_CHANGE_UNBLOCK) {
+        vg_cidr_to_str(&ch->cidr, cidr, sizeof(cidr));
+        n = snprintf(out + w, size - (size_t) w,
+                     " id=%" PRIu64 " cidr=%s reason=%s expires=%lld",
+                     ch->id, cidr, vg_reason_name(ch->reason),
+                     (long long) ch->expires);
+        w += n;
+    }
+
+    out[w++] = '\n';
+    out[w] = '\0';
+
+    return w;
+}
+
+
+/*
+ * Every listed block, in pages: "blocks" for the first, "blocks after
+ * <id>" for the one after id, until "next=end". Oldest first; ids only
+ * grow, so a block added while the pages are read comes in a later one.
+ * seq is the last change at this page: after a gap, the reader carries on
+ * from the seq of the first page, and a change since then may name a
+ * block it has already read.
+ *
+ *   epoch=<16 hex> seq=N n=<lines> next=<id>|end
+ *   id=N cidr=C reason=R inserted=<Unix s> expires=<Unix s, 0 if none>
+ */
+static void
+ctl_blocks(struct vg_ctrl *ctrl, const char *args, char *reply,
+    size_t reply_size)
+{
+    int                        w, n;
+    char                      *body, line[192], cidr[80], next[24];
+    size_t                     used;
+    uint64_t                   after;
+    const struct vg_drop_rec  *r, *last;
+
+    after = 0;
+
+    if (*args != '\0'
+        && (strncmp(args, " after ", 7) != 0
+            || parse_u64(args + 7, 10, &after) < 0))
+    {
+        snprintf(reply, reply_size, "error: usage: blocks [after <id>]\n");
+        return;
+    }
+
+    body = malloc(reply_size);
+
+    if (body == NULL) {
+        snprintf(reply, reply_size, "error: out of memory\n");
+        return;
+    }
+
+    used = 0;
+    n = 0;
+    last = NULL;
+
+    for (r = vg_ctrl_block_after(ctrl, after);
+         r != NULL && n < VG_BLOCKS_PAGE;
+         r = vg_ctrl_block_next(ctrl, r))
+    {
+        vg_cidr_to_str(&r->cidr, cidr, sizeof(cidr));
+        w = snprintf(line, sizeof(line), "id=%" PRIu64 " cidr=%s reason=%s "
+                     "inserted=%lld expires=%lld\n", r->id, cidr,
+                     vg_reason_name(r->reason), (long long) r->inserted,
+                     r->reason == VG_REASON_TIMED
+                     ? (long long) r->expires : 0LL);
+
+        if (used + (size_t) w + 80 >= reply_size) {
+            break;
+        }
+
+        memcpy(body + used, line, (size_t) w);
+        used += (size_t) w;
+        last = r;
+        n++;
+    }
+
+    if (r == NULL || last == NULL) {
+        snprintf(next, sizeof(next), "end");
+
+    } else {
+        snprintf(next, sizeof(next), "%" PRIu64, last->id);
+    }
+
+    w = snprintf(reply, reply_size, "epoch=%016" PRIx64 " seq=%" PRIu64
+                 " n=%d next=%s\n", ctrl->epoch, ctrl->seq, n, next);
+
+    memcpy(reply + w, body, used);
+    reply[w + used] = '\0';
+    free(body);
+}
+
+
+/* Digits only, in base 10 or 16, at most 64 bits. */
+static int
+parse_u64(const char *s, int base, uint64_t *out)
+{
+    int       d;
+    uint64_t  v;
+
+    if (*s == '\0') {
+        return -1;
+    }
+
+    for (v = 0; *s != '\0'; s++) {
+        if (*s >= '0' && *s <= '9') {
+            d = *s - '0';
+
+        } else if (base == 16 && *s >= 'a' && *s <= 'f') {
+            d = *s - 'a' + 10;
+
+        } else if (base == 16 && *s >= 'A' && *s <= 'F') {
+            d = *s - 'A' + 10;
+
+        } else {
+            return -1;
+        }
+
+        if (v > (UINT64_MAX - (uint64_t) d) / (uint64_t) base) {
+            return -1;
+        }
+
+        v = v * (uint64_t) base + (uint64_t) d;
+    }
+
+    *out = v;
+
+    return 0;
+}
+
+
 /* group (-g): NULL leaves the socket to root alone; otherwise members of
  * that group (sw_configd, an nginx/OpenResty worker user) get the full
- * control protocol. One that /etc/group doesn't know is an error.
+ * control protocol. One that /etc/group doesn't know is an error. The
+ * read-only socket (-R) is made the same way, for its group.
  */
 int
 vg_ctl_server_listen(const char *path, const char *group, char *err,
@@ -390,13 +675,15 @@ vg_ctl_server_listen(const char *path, const char *group, char *err,
 
 
 void
-vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd)
+vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int readonly)
 {
     char                    *nl;
+    uid_t                    uid;
     size_t                   i, len, used = 0;
     ssize_t                  n;
     const vg_ctl_command_t  *cmd;
-    char                     req[256], reply[8192];
+    char                     req[256];
+    static char              reply[VG_PAGE_REPLY_SIZE];
 
     for (;;) {
         n = read(cfd, req + used, sizeof(req) - 1 - used);
@@ -445,14 +732,37 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd)
         cmd = &vg_ctl_commands[i];
         len = strlen(cmd->name);
 
-        if (cmd->prefix ? strncmp(req, cmd->name, len) == 0
-                        : strcmp(req, cmd->name) == 0)
+        if (!(cmd->prefix ? strncmp(req, cmd->name, len) == 0
+                          : strcmp(req, cmd->name) == 0))
         {
-            reply[0] = 0;
-            cmd->handler(ctrl, cmd->prefix ? req + len : NULL,
-                         reply, sizeof(reply));
+            continue;
+        }
+
+        /* "changes" and "blocks" take arguments after a space, or none */
+        if (cmd->prefix && cmd->name[len - 1] != ' '
+            && req[len] != '\0' && req[len] != ' ')
+        {
+            continue;
+        }
+
+        if (readonly && !cmd->read) {
+            snprintf(reply, sizeof(reply), "error: read-only socket\n");
             break;
         }
+
+        /* the changes a command causes are its caller's */
+        uid = (uid_t) -1;
+
+        if (!readonly) {
+            (void) sw_sock_peer(cfd, NULL, &uid, NULL);
+            vg_ctrl_caller(ctrl, 1, (uint32_t) uid);
+        }
+
+        reply[0] = 0;
+        cmd->handler(ctrl, cmd->prefix ? req + len : NULL, reply,
+                     cmd->page ? sizeof(reply) : VG_REPLY_SIZE);
+        vg_ctrl_caller(ctrl, 0, 0);
+        break;
     }
 
 send_reply:

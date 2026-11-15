@@ -26,6 +26,10 @@ static void test_del_fail(void);
 static void test_expire_log(void);
 static void test_drop_log(void);
 static void test_pool(void);
+static void test_changes(void);
+static void test_changes_wrap(void);
+static void test_blocks_pages(void);
+static struct vg_cidr v4(int a, int b, int c, int d, int len);
 static int log_count(const char *path, const char *needle);
 static int log_line_of(const char *path, const char *needle);
 static int log_start(char *path);
@@ -812,6 +816,235 @@ test_pool(void)
 }
 
 
+static struct vg_cidr
+v4(int a, int b, int c, int d, int len)
+{
+    struct vg_cidr  p;
+
+    memset(&p, 0, sizeof(p));
+    p.family = AF_INET;
+    p.prefixlen = (uint8_t) len;
+    p.addr[0] = (uint8_t) a;
+    p.addr[1] = (uint8_t) b;
+    p.addr[2] = (uint8_t) c;
+    p.addr[3] = (uint8_t) d;
+
+    return p;
+}
+
+
+/* The change stream (Seawall proposal 0012 §2): every block, lift, arm,
+ * disarm and reload, in order, each the socket caller's or voidgate's own;
+ * "drop list full" refusals summed per tick.
+ */
+static void
+test_changes(void)
+{
+    struct vg_config         cfg;
+    struct vg_ctrl           c;
+    struct vg_cidr           p[6];
+    const struct vg_change  *ch;
+    char                     path[32];
+    int                      i, saved;
+    uint64_t                 s;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.drop_map_size = 2;
+    cfg.wake_pps = 0;
+    cfg.wake_mbps = 0;
+    nitems = 0;
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+    assert(c.epoch != 0 && c.seq == 0);
+    assert(vg_ctrl_change(&c, 0) == NULL && vg_ctrl_change(&c, 1) == NULL);
+    assert(vg_ctrl_changes_oldest(&c) == 1);
+
+    for (i = 0; i < 6; i++) {
+        p[i] = v4(198, 18, 12, i, 32);
+    }
+
+    /* a socket's drop, the gate idle: the arm is the caller's too */
+    vg_ctrl_caller(&c, 1, 1000);
+    assert(vg_ctrl_drop(&c, &p[0], VG_REASON_MANUAL) == 0);
+    vg_ctrl_caller(&c, 0, 0);
+    assert(c.seq == 2);
+    ch = vg_ctrl_change(&c, 1);
+    assert(ch->kind == VG_CHANGE_ARM && ch->socket && ch->uid == 1000);
+    assert(strcmp(ch->cause, "manual-drop") == 0 && ch->time_ms > 0);
+    ch = vg_ctrl_change(&c, 2);
+    assert(ch->kind == VG_CHANGE_BLOCK && ch->socket && ch->uid == 1000);
+    assert(ch->id == 1 && ch->reason == VG_REASON_MANUAL && ch->expires == 0);
+    assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
+
+    /* voidgate's own; a timed re-drop that extends is a change, a policy
+     * re-drop that changes nothing isn't
+     */
+    assert(vg_ctrl_drop_ttl(&c, &p[1], 60) == 0);
+    ch = vg_ctrl_change(&c, 3);
+    assert(ch->kind == VG_CHANGE_BLOCK && !ch->socket && ch->id == 2);
+    assert(ch->reason == VG_REASON_TIMED && ch->expires > time(NULL));
+    assert(vg_ctrl_drop_ttl(&c, &p[1], 600) == 0);
+    ch = vg_ctrl_change(&c, 4);
+    assert(ch->kind == VG_CHANGE_BLOCK && ch->id == 2);
+    assert(ch->expires >= time(NULL) + 599);
+    assert(vg_ctrl_drop(&c, &p[0], VG_REASON_POLICY) == 0);
+    assert(vg_ctrl_drop(&c, &p[1], VG_REASON_POLICY) == 0);
+    assert(c.seq == 4);
+
+    /* full: refusals counted, one line, no change */
+    assert(vg_ctrl_drop(&c, &p[2], VG_REASON_POLICY) == 0);
+    assert(vg_ctrl_drop(&c, &p[3], VG_REASON_POLICY) == 0);
+    assert(c.seq == 6);
+    snprintf(path, sizeof(path), "/tmp/vg-changes-log-XXXXXX");
+    saved = log_start(path);
+
+    for (i = 0; i < 3; i++) {
+        assert(vg_ctrl_drop(&c, &p[4], VG_REASON_POLICY) < 0);
+    }
+
+    assert(c.refused_full == 3 && c.seq == 6);
+
+    /* the lift logs the pending lines first */
+    vg_ctrl_caller(&c, 1, 0);
+    assert(vg_ctrl_undrop(&c, &p[0]) == 0);
+    vg_ctrl_caller(&c, 0, 0);
+    log_stop(saved);
+    assert(log_count(path, "refused 3 drops: drop list full (4)") == 1);
+    assert(log_count(path, "refused:") == 0);
+    assert(c.refused_full == 0);
+    unlink(path);
+
+    ch = vg_ctrl_change(&c, 7);
+    assert(ch->kind == VG_CHANGE_UNBLOCK && ch->socket && ch->uid == 0);
+    assert(strcmp(ch->cause, "undrop") == 0 && ch->id == 1);
+    assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
+
+    /* not listed: nothing lifted, no change */
+    assert(vg_ctrl_undrop(&c, &p[5]) == 0);
+    assert(c.seq == 7);
+
+    /* expiry is voidgate's own: one change per lift */
+    age_all(&c, time(NULL) - 1, 1);
+    assert(tick(&c) == 0);
+    assert(c.drop_count == 0 && c.seq == 10);
+
+    for (s = 8; s <= 10; s++) {
+        ch = vg_ctrl_change(&c, s);
+        assert(ch->kind == VG_CHANGE_UNBLOCK && !ch->socket);
+        assert(strcmp(ch->cause, "expired") == 0);
+    }
+
+    /* a reload's lifts, then the reload; a disarm lifts all in one */
+    assert(vg_ctrl_drop(&c, &p[5], VG_REASON_MANUAL) == 0);
+    cfg.local_cidr[0] = p[5];
+    cfg.local_cidr_count = 1;
+    assert(vg_ctrl_prune_protected(&c) == 1);
+    vg_ctrl_reloaded(&c);
+    assert(vg_ctrl_change(&c, 12)->kind == VG_CHANGE_UNBLOCK);
+    assert(strcmp(vg_ctrl_change(&c, 12)->cause, "reload") == 0);
+    assert(vg_ctrl_change(&c, 13)->kind == VG_CHANGE_RELOAD);
+    cfg.local_cidr_count = 0;
+
+    assert(vg_ctrl_drop(&c, &p[4], VG_REASON_POLICY) == 0);
+    assert(vg_ctrl_disarm(&c, "attack cleared") == 0);
+    ch = vg_ctrl_change(&c, 15);
+    assert(ch->kind == VG_CHANGE_DISARM && !ch->socket);
+    assert(strcmp(ch->cause, "attack-cleared") == 0);
+    assert(c.seq == 15 && vg_ctrl_change(&c, 16) == NULL);
+
+    vg_ctrl_free(&c);
+}
+
+
+/* Only the last VG_CHANGES are kept; an older one is gone, and the epoch
+ * differs from another start's.
+ */
+static void
+test_changes_wrap(void)
+{
+    struct vg_config  cfg;
+    struct vg_ctrl    c, d;
+    struct vg_cidr    p;
+    int               i;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    nitems = 0;
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+    assert(vg_ctrl_init(&d, &cfg, NULL, NULL, NULL) == 0);
+    assert(c.epoch != d.epoch);
+    c.state = VG_ACTIVE;
+    p = v4(198, 18, 13, 1, 32);
+
+    for (i = 0; i < VG_CHANGES / 2 + 10; i++) {
+        assert(vg_ctrl_drop(&c, &p, VG_REASON_MANUAL) == 0);
+        assert(vg_ctrl_undrop(&c, &p) == 0);
+    }
+
+    assert(c.seq == VG_CHANGES + 20);
+    assert(vg_ctrl_changes_oldest(&c) == 21);
+    assert(vg_ctrl_change(&c, 20) == NULL);
+    assert(vg_ctrl_change(&c, 21)->seq == 21);
+    assert(vg_ctrl_change(&c, c.seq)->kind == VG_CHANGE_UNBLOCK);
+    assert(vg_ctrl_change(&c, c.seq + 1) == NULL);
+
+    vg_ctrl_free(&c);
+    vg_ctrl_free(&d);
+}
+
+
+/* Pages of blocks: by id, oldest first, from where the last page ended,
+ * whether that block is still listed or not.
+ */
+static void
+test_blocks_pages(void)
+{
+    struct vg_config           cfg;
+    struct vg_ctrl             c;
+    struct vg_cidr             p[5];
+    const struct vg_drop_rec  *r;
+    int                        i;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    nitems = 0;
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+    c.state = VG_ACTIVE;
+    assert(vg_ctrl_block_after(&c, 0) == NULL);
+
+    for (i = 0; i < 5; i++) {
+        p[i] = v4(198, 18, 14, i, 32);
+        assert(vg_ctrl_drop(&c, &p[i], VG_REASON_MANUAL) == 0);
+    }
+
+    /* a page of two */
+    r = vg_ctrl_block_after(&c, 0);
+    assert(r->id == 1);
+    r = vg_ctrl_block_next(&c, r);
+    assert(r->id == 2);
+    assert(vg_ctrl_block_next(&c, r)->id == 3);   /* hint: 2 */
+
+    /* the next page from the hint; then the hint lifted: by walking */
+    assert(vg_ctrl_block_after(&c, 2)->id == 3);
+    assert(vg_ctrl_undrop(&c, &p[2]) == 0);
+    assert(c.page_hint == NULL || c.page_hint->id != 3);
+    assert(vg_ctrl_block_after(&c, 3)->id == 4);
+
+    /* a lifted record handed out again gets a new id, at the end */
+    assert(vg_ctrl_drop(&c, &p[2], VG_REASON_MANUAL) == 0);
+    assert(nth(&c, 4)->id == 6);
+    assert(vg_ctrl_block_after(&c, 5)->id == 6);
+    assert(vg_ctrl_block_after(&c, 6) == NULL);
+
+    /* a disarm forgets every record, and the hint */
+    assert(vg_ctrl_disarm(&c, "test") == 0);
+    assert(vg_ctrl_block_after(&c, 0) == NULL);
+    assert(vg_ctrl_block_after(&c, 5) == NULL);
+
+    vg_ctrl_free(&c);
+}
+
+
 int
 main(void)
 {
@@ -945,6 +1178,9 @@ main(void)
     test_drop_log_burst();
     test_drop_log_order();
     test_pool();
+    test_changes();
+    test_changes_wrap();
+    test_blocks_pages();
     puts("control-plane regression tests passed");
 
     return 0;

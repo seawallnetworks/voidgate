@@ -184,8 +184,12 @@ runs the verdicts at TC (`make test` runs all three hooks), and
   (packet specs: `t/lib/VG/Packet.pm`); if you change wake/arm, run
   `t/integration/netns.sh`.
 - Unix ctl protocol is one line in, text out: `status`, `stats`,
-  `drops`, `arm`, `disarm`, `drop <cidr> [ttl=<sec>]`, `undrop <cidr>`,
-  `reload`.
+  `drops`, `changes [<epoch> <seq>]`, `blocks [after <id>]`, `arm`,
+  `disarm`, `drop <cidr> [ttl=<sec>]`, `undrop <cidr>`, `reload`. The
+  read-only socket (`-R`, `/run/voidgate-monitor.sock`) answers only the
+  first five. Every block, lift, arm, disarm and reload goes in the change
+  stream (`change_add()` in `policy.c`), with the socket caller's uid or
+  `self`: a new way to change state records its change too.
   Replies starting with `error` make `voidgatectl` exit 1. Keep the
   `drops` line format (`<cidr> reason=N age=N`): the Lua client and
   tests anchor on it.

@@ -50,6 +50,9 @@ static volatile sig_atomic_t g_stop;
 /* the process that removes the control socket if it exits early */
 static pid_t vg_sock_owner;
 
+/* the read-only socket (-R) is ours to remove too */
+static int vg_monitor_sock;
+
 static void
 on_signal(int sig)
 {
@@ -64,6 +67,10 @@ sock_unlink(void)
 {
     if (vg_sock_owner == getpid()) {
         unlink(VG_SOCK_PATH);
+
+        if (vg_monitor_sock) {
+            unlink(VG_MONITOR_SOCK_PATH);
+        }
     }
 }
 
@@ -81,7 +88,11 @@ usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [-d] [-s stop] [-c config] [-i iface] [-g group]"
-            " [-v|-vv]\n",
+            " [-R group] [-v|-vv]\n"
+            "  -g group  the control socket " VG_SOCK_PATH "'s group\n"
+            "  -R group  also listen on " VG_MONITOR_SOCK_PATH ", read-only\n"
+            "            (status, stats, drops, changes, blocks), for "
+            "this group\n",
             argv0);
 }
 
@@ -291,7 +302,8 @@ main(int argc, char **argv)
     const char *cfg_path = VG_CONF_PATH;
     const char *iface_ov = NULL;
     const char *ctl_group = NULL;
-    int opt, ctl_fd, http_fd = -1;
+    const char *ro_group = NULL;
+    int opt, ctl_fd, ro_fd = -1, http_fd = -1;
     int daemon_mode = 0, stop_mode = 0, log_fd = -1, ready_fd = -1;
     int result = 0;
     int pid_fd;
@@ -301,7 +313,7 @@ main(int argc, char **argv)
 
     sw_log_init("voidgate");
 
-    while ((opt = getopt(argc, argv, "c:i:g:ds:hv")) != -1) {
+    while ((opt = getopt(argc, argv, "c:i:g:R:ds:hv")) != -1) {
         switch (opt) {
         case 'c':
             cfg_path = optarg;
@@ -311,6 +323,9 @@ main(int argc, char **argv)
             break;
         case 'g':
             ctl_group = optarg;
+            break;
+        case 'R':
+            ro_group = optarg;
             break;
         case 'v':
             if (vg_verbose < 2) {
@@ -375,6 +390,19 @@ main(int argc, char **argv)
 
     vg_sock_owner = getpid();
     atexit(sock_unlink);
+
+    /* The control socket answered nobody else: neither does this one. */
+    if (ro_group != NULL) {
+        ro_fd = vg_ctl_server_listen(VG_MONITOR_SOCK_PATH, ro_group, err,
+                                     sizeof(err));
+
+        if (ro_fd < 0) {
+            unlink(cfg.pid_file);
+            sw_log_fatal("read-only socket %s", err);
+        }
+
+        vg_monitor_sock = 1;
+    }
 
     if (iface_ov != NULL) {
         snprintf(cfg.interface, sizeof(cfg.interface), "%s", iface_ov);
@@ -444,6 +472,11 @@ main(int argc, char **argv)
 
     sw_log_info("ctl socket %s", VG_SOCK_PATH);
 
+    if (ro_fd >= 0) {
+        sw_log_info("read-only socket %s, group %s", VG_MONITOR_SOCK_PATH,
+                    ro_group);
+    }
+
     http_fd = vg_http_listen(cfg.metrics_port);
 
     if (http_fd >= 0) {
@@ -480,7 +513,7 @@ main(int argc, char **argv)
 
     clock_gettime(CLOCK_MONOTONIC, &last_tick);
     while (!g_stop) {
-        struct pollfd pfd[2];
+        struct pollfd pfd[3];
         int nfds = 0, pr, wait_ms;
         struct timespec now;
         long elapsed;
@@ -496,6 +529,12 @@ main(int argc, char **argv)
         pfd[nfds].fd = ctl_fd;
         pfd[nfds].events = POLLIN;
         nfds++;
+
+        if (ro_fd >= 0) {
+            pfd[nfds].fd = ro_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
 
         if (http_fd >= 0) {
             pfd[nfds].fd = http_fd;
@@ -531,8 +570,8 @@ main(int argc, char **argv)
 
                 sw_sock_timeouts(cfd, VG_SOCK_TIMEOUT_MS);
 
-                if (pfd[i].fd == ctl_fd) {
-                    vg_ctl_server_handle(&ctrl, cfd);
+                if (pfd[i].fd == ctl_fd || pfd[i].fd == ro_fd) {
+                    vg_ctl_server_handle(&ctrl, cfd, pfd[i].fd == ro_fd);
 
                 } else {
                     vg_http_handle(&ctrl, cfd);
@@ -557,6 +596,11 @@ main(int argc, char **argv)
     close(ctl_fd);
     vg_sock_owner = 0;
     unlink(VG_SOCK_PATH);
+
+    if (ro_fd >= 0) {
+        close(ro_fd);
+        unlink(VG_MONITOR_SOCK_PATH);
+    }
 
     if (http_fd >= 0) {
         close(http_fd);

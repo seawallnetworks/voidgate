@@ -60,7 +60,7 @@ start_daemon() {
 
 stop_daemon() {
     "$root/voidgate" -s stop -c base.conf
-    [[ ! -e /run/voidgate.sock ]]
+    [[ ! -e /run/voidgate.sock && ! -e /run/voidgate-monitor.sock ]]
     [[ ! -e /run/voidgate.pid ]]
     # An XDP program must no longer be attached after socket removal.
     [[ $(ip -details link show test0) != *prog/xdp* ]]
@@ -137,6 +137,91 @@ grep -q 'no group "no-such-voidgate-group" in /etc/group' failure.err
 start_daemon -c base.conf
 [[ $(stat -c '%a %G' /run/voidgate.sock) == '660 root' ]]
 stop_daemon
+
+# -R: the read-only socket (Seawall proposal 0012 §2), for its group. It
+# answers status, stats, drops, changes and blocks, and refuses the rest.
+# Each change says whose it is: a socket caller's uid, or voidgate's own.
+ro() { "$root/voidgatectl" -s /run/voidgate-monitor.sock "$@"; }
+as_nobody() { setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"; }
+cp base.conf ro.conf
+printf 'drop_map_size = 512\n' >> ro.conf
+start_daemon -c ro.conf -g nogroup -R nogroup
+[[ $(stat -c '%a %U %G' /run/voidgate-monitor.sock) == '660 root nogroup' ]]
+[[ $(ro status | tail -1) == state=idle* ]]
+[[ $(ro stats | tail -1) == rx_pps=* ]]
+[[ $(ro drops) == '(none)' ]]
+for command in arm disarm reload 'drop 198.18.0.9/32' 'undrop 198.18.0.9/32'; do
+    result=0
+    ro $command > ro.out || result=$?
+    [[ $result == 1 && $(< ro.out) == 'error: read-only socket' ]]
+done
+[[ $(ro status | tail -1) == state=idle* ]]
+result=0
+ro changesx > ro.out || result=$?
+[[ $result == 1 && $(< ro.out) == 'error: unknown command' ]]
+
+cursor=$(ro changes)
+[[ $cursor =~ ^epoch=([0-9a-f]{16})\ seq=0\ oldest=1\ gap=0\ n=0\ more=0$ ]]
+epoch=${BASH_REMATCH[1]}
+# a drop by uid 0 arms the gate: both its own; one by nobody, its uid
+[[ $("$root/voidgatectl" drop 198.18.0.1/32) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" drop 198.18.0.2/32 ttl=60) == ok ]]
+ro changes "$epoch" 0 > changes.out
+mapfile -t lines < changes.out
+[[ ${lines[0]} == "epoch=$epoch seq=3 oldest=1 gap=0 n=3 more=0" ]]
+[[ ${lines[1]} =~ ^seq=1\ time=[0-9]{13}\ kind=arm\ source=socket\ uid=0\ cause=manual-drop$ ]]
+[[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=socket\ uid=0\ id=1\ cidr=198\.18\.0\.1/32\ reason=manual\ expires=0$ ]]
+[[ ${lines[3]} =~ ^seq=3\ time=[0-9]+\ kind=block\ source=socket\ uid=65534\ id=2\ cidr=198\.18\.0\.2/32\ reason=timed\ expires=[0-9]{10}$ ]]
+# nothing new; another epoch, or a cursor not reached yet, is a gap
+[[ $(ro changes "$epoch" 3) == "epoch=$epoch seq=3 oldest=1 gap=0 n=0 more=0" ]]
+[[ $(ro changes 0000000000000001 2) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
+[[ $(ro changes "$epoch" 9) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
+result=0
+ro changes "$epoch" > ro.out || result=$?
+[[ $result == 1 && $(< ro.out) == 'error: usage: changes <epoch> <seq>' ]]
+
+ro blocks > blocks.out
+mapfile -t lines < blocks.out
+[[ ${lines[0]} == "epoch=$epoch seq=3 n=2 next=end" ]]
+[[ ${lines[1]} =~ ^id=1\ cidr=198\.18\.0\.1/32\ reason=manual\ inserted=[0-9]{10}\ expires=0$ ]]
+[[ ${lines[2]} =~ ^id=2\ cidr=198\.18\.0\.2/32\ reason=timed\ inserted=[0-9]+\ expires=[0-9]{10}$ ]]
+[[ $(ro blocks after 1 | head -1) == "epoch=$epoch seq=3 n=1 next=end" ]]
+[[ $(ro blocks after 2) == "epoch=$epoch seq=3 n=0 next=end" ]]
+
+# 300 blocks: two pages, then the end
+for i in $(seq 0 1 297); do
+    printf 'drop 198.19.%d.%d/32\n' $((i / 250)) $((i % 250))
+done | while read -r line; do
+    "$root/voidgatectl" $line > /dev/null
+done
+first=$(ro blocks | head -1)
+[[ $first =~ ^epoch=$epoch\ seq=[0-9]+\ n=256\ next=([0-9]+)$ ]]
+next=${BASH_REMATCH[1]}
+[[ $(ro blocks after "$next" | head -1) =~ ^epoch=$epoch\ seq=[0-9]+\ n=44\ next=end$ ]]
+
+# undrop and disarm, by the caller; then a reload
+[[ $("$root/voidgatectl" undrop 198.18.0.1/32) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" disarm) == ok ]]
+[[ $("$root/voidgatectl" reload) == ok ]]
+ro changes "$epoch" 301 > changes.out
+mapfile -t lines < changes.out
+[[ ${lines[0]} == "epoch=$epoch seq=304 oldest=1 gap=0 n=3 more=0" ]]
+[[ ${lines[1]} =~ kind=unblock\ source=socket\ uid=0\ cause=undrop\ id=1\ cidr=198\.18\.0\.1/32 ]]
+[[ ${lines[2]} =~ kind=disarm\ source=socket\ uid=65534\ cause=command$ ]]
+[[ ${lines[3]} =~ kind=reload\ source=socket\ uid=0\ cause=reload$ ]]
+grep -q 'disarmed (command, socket uid 65534)' "$work/log/voidgate.log"
+[[ $(ro blocks) == "epoch=$epoch seq=304 n=0 next=end" ]]
+stop_daemon
+
+# A restart draws another epoch.
+start_daemon -c base.conf -R nogroup
+[[ $(ro changes) =~ ^epoch=([0-9a-f]{16})\ seq=0 ]]
+[[ ${BASH_REMATCH[1]} != "$epoch" ]]
+stop_daemon
+# An unknown group stops the start, and leaves neither socket.
+expect_failure "$root/voidgate" -d -c base.conf -R no-such-voidgate-group
+grep -q 'no group "no-such-voidgate-group" in /etc/group' failure.err
+[[ ! -e /run/voidgate-monitor.sock && ! -e /run/voidgate.pid ]]
 
 # Append mode preserves existing contents.
 cp base.conf append.conf

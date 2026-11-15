@@ -12,7 +12,11 @@ struct vg_ctrl;
 
 int vg_ctl_server_listen(const char *path, const char *group, char *err,
     size_t errlen);
-/* The caller sets socket timeouts and closes fd after handling. */
-void vg_ctl_server_handle(struct vg_ctrl *ctrl, int fd);
+/*
+ * The caller sets socket timeouts and closes fd after handling. readonly:
+ * the read-only socket's, where only status, stats, drops, changes and
+ * blocks are answered.
+ */
+void vg_ctl_server_handle(struct vg_ctrl *ctrl, int fd, int readonly);
 
 #endif /* _VG_CTL_SERVER_H_INCLUDED_ */
