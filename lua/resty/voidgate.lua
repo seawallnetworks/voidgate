@@ -11,6 +11,11 @@
 --
 -- Lua cannot install a permanent drop: every drop needs a ttl. A permanent
 -- drop is an operator's decision (voidgatectl drop <cidr>).
+--
+-- M.ban() and M.ban_now() use the ban socket, /run/voidgate-ban.sock
+-- (group voidgate_ban), which takes only drops with a ttl. The other
+-- methods, through M.new(), use the control socket, /run/voidgate.sock
+-- (group voidgate), the whole protocol.
 
 local ngx = ngx
 
@@ -168,6 +173,8 @@ function M.new(opt)
 end
 
 local default = M.new()
+-- ban() and ban_now()'s, unless opt.client is given
+local ban_default = M.new({ path = "/run/voidgate-ban.sock" })
 for _, name in ipairs({
     "status", "stats", "drops", "arm", "disarm", "drop", "undrop", "reload",
 }) do
@@ -203,7 +210,7 @@ end
 --           per window, so the burst of requests before XDP takes over
 --           does not queue one timer per request. Recommended.
 --   window  seconds, default 10.
---   client  a client from M.new(); default /run/voidgate.sock.
+--   client  a client from M.new(); default /run/voidgate-ban.sock.
 -- ip must be the real peer: ngx.var.remote_addr, or the realip module's
 -- result only when set_real_ip_from lists your proxies.
 function M.ban(ip, ttl, opt)
@@ -234,20 +241,21 @@ function M.ban(ip, ttl, opt)
         end
     end
 
-    return ngx.timer.at(0, ban_timer, opt.client or default, cidr, ttl)
+    return ngx.timer.at(0, ban_timer, opt.client or ban_default, cidr, ttl)
 end
 
 -- Ban one client address for ttl seconds now and return the daemon's
 -- answer: true, or nil, err (refused, bad input, daemon down, or a phase
 -- without cosockets). Same ip and ttl rules as M.ban(), no deduplication.
 -- Only where cosockets work (rewrite, access, content, timers); elsewhere
--- use M.ban(). opt.client: a client from M.new().
+-- use M.ban(). opt.client: a client from M.new(); default
+-- /run/voidgate-ban.sock.
 function M.ban_now(ip, ttl, opt)
     local cidr = host_cidr(ip)
     if not cidr then
         return nil, "bad ip"
     end
-    return ((opt and opt.client) or default):drop(cidr, ttl)
+    return ((opt and opt.client) or ban_default):drop(cidr, ttl)
 end
 
 return M

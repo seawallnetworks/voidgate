@@ -12,6 +12,7 @@
 #define VG_SOCK_PATH  "/run/voidgate.sock"
 /* read-only: status, stats, drops, changes, blocks (Seawall proposal 0012) */
 #define VG_MONITOR_SOCK_PATH  "/run/voidgate-monitor.sock"
+#define VG_BAN_SOCK_PATH      "/run/voidgate-ban.sock"
 
 #define VG_MAX_ALLOW_PORTS  8
 

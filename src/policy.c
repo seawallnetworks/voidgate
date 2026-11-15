@@ -300,7 +300,7 @@ change_add(struct vg_ctrl *c, int kind, const char *cause)
     ch->time_ms = (uint64_t) ts.tv_sec * 1000
                   + (uint64_t) ts.tv_nsec / 1000000;
     ch->kind = (uint8_t) kind;
-    ch->socket = (uint8_t) c->caller_socket;
+    ch->source = (uint8_t) c->caller_source;
     ch->uid = c->caller_uid;
 
     for (i = 0; cause != NULL && cause[i] != '\0'
@@ -334,10 +334,18 @@ change_block(struct vg_ctrl *c, int kind, const char *cause,
 
 
 void
-vg_ctrl_caller(struct vg_ctrl *c, int socket, uint32_t uid)
+vg_ctrl_caller(struct vg_ctrl *c, int source, uint32_t uid)
 {
-    c->caller_socket = socket;
-    c->caller_uid = socket ? uid : 0;
+    c->caller_source = source;
+    c->caller_uid = source != VG_SOURCE_SELF ? uid : 0;
+}
+
+
+const char *
+vg_source_name(int source)
+{
+    return source == VG_SOURCE_SOCKET ? "socket"
+           : source == VG_SOURCE_BAN ? "ban" : "self";
 }
 
 
@@ -537,7 +545,13 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         return -1;
     }
 
-    if (c->state != VG_ACTIVE && vg_ctrl_arm(c, "manual drop") < 0) {
+    /* A ban client's drop arms too, or its blocks would do nothing in an
+     * attack; the arm is that client's, cause "ban".
+     */
+    if (c->state != VG_ACTIVE
+        && vg_ctrl_arm(c, c->caller_source == VG_SOURCE_BAN
+                          ? "ban" : "manual drop") < 0)
+    {
         return -1;
     }
 
@@ -722,9 +736,9 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
     c->state = VG_ACTIVE;
     (void) change_add(c, VG_CHANGE_ARM, why);
 
-    if (c->caller_socket) {
-        sw_log_info("armed (%s, socket uid %u)", why != NULL ? why : "",
-                    c->caller_uid);
+    if (c->caller_source != VG_SOURCE_SELF) {
+        sw_log_info("armed (%s, %s uid %u)", why != NULL ? why : "",
+                    vg_source_name(c->caller_source), c->caller_uid);
 
     } else {
         sw_log_info("armed (%s)", why != NULL ? why : "");
@@ -755,9 +769,9 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
     c->quiet_since = 0;
     (void) change_add(c, VG_CHANGE_DISARM, why);
 
-    if (c->caller_socket) {
-        sw_log_info("disarmed (%s, socket uid %u)", why != NULL ? why : "",
-                    c->caller_uid);
+    if (c->caller_source != VG_SOURCE_SELF) {
+        sw_log_info("disarmed (%s, %s uid %u)", why != NULL ? why : "",
+                    vg_source_name(c->caller_source), c->caller_uid);
 
     } else {
         sw_log_info("disarmed (%s)", why != NULL ? why : "");

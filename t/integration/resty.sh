@@ -47,7 +47,8 @@ cp "$root/t/conf/idle.conf" "$conf"
 printf 'log_file = %s\n' "$work/daemon.log" >> "$conf"
 printf 'pid_file = %s\n' "$work/voidgate.pid" >> "$conf"
 # -v: one log line per drop, so the dedup check below can count them.
-timeout --kill-after=2 10 "$root/voidgate" -d -v -g nogroup -c "$conf"
+# -B: ban() and ban_now() use the ban socket.
+timeout --kill-after=2 10 "$root/voidgate" -d -v -g nogroup -B nogroup -c "$conf"
 
 modules=
 for m in ndk_http_module ngx_http_lua_module; do

@@ -62,6 +62,16 @@ ok(vg.ban_now("203.0.113.0/24", 60) == nil
     and select(2, vg.ban_now("203.0.113.11")) == "bad ttl"
     and #assert(conn:drops()) == 2, "ban_now rejects locally")
 ok(conn:disarm(), "disarm after ban_now")
+
+-- the ban socket, which ban() and ban_now() use, takes drops with a ttl
+-- and nothing else
+local banc = vg.new({ path = "/run/voidgate-ban.sock", timeout = 0.5 })
+pass, err = banc:disarm()
+ok(pass == nil and err:find("^error: denied"), "ban socket: no disarm")
+pass, err = banc:status()
+ok(pass == nil and err:find("^error: denied"), "ban socket: no status")
+ok(banc:drop("203.0.113.12/32", 60), "ban socket: a drop with a ttl")
+ok(conn:disarm(), "disarm after the ban socket")
 for _, ttl in ipairs({ 0, -1, 1.5, "x", 31536001 }) do
     pass, err = conn:drop("203.0.113.9/32", ttl)
     ok(pass == nil and err == "bad ttl", "reject ttl " .. tostring(ttl))

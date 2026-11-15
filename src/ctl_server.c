@@ -66,6 +66,7 @@ static int change_line(const struct vg_change *ch, char *out, size_t size);
 static void ctl_blocks(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int parse_u64(const char *s, int base, uint64_t *out);
+static int ban_allowed(const vg_ctl_command_t *cmd, const char *args);
 
 
 static const vg_ctl_command_t  vg_ctl_commands[] = {
@@ -80,6 +81,26 @@ static const vg_ctl_command_t  vg_ctl_commands[] = {
     { "undrop ",  1, 0, 0, ctl_undrop },
     { "reload",   0, 0, 0, ctl_reload }
 };
+
+
+/*
+ * On the ban socket, only "drop <cidr> ttl=<seconds>": a drop whose
+ * options are a valid ttl and nothing else. ctl_drop() checks the cidr.
+ */
+static int
+ban_allowed(const vg_ctl_command_t *cmd, const char *args)
+{
+    uint32_t     ttl;
+    const char  *sp;
+
+    if (cmd->handler != ctl_drop) {
+        return 0;
+    }
+
+    sp = strchr(args, ' ');
+
+    return sp != NULL && parse_ttl(sp + 1, &ttl) == 0;
+}
 
 
 /*
@@ -514,7 +535,7 @@ change_line(const struct vg_change *ch, char *out, size_t size)
     uid[0] = '\0';
     cause[0] = '\0';
 
-    if (ch->socket) {
+    if (ch->source != VG_SOURCE_SELF) {
         snprintf(uid, sizeof(uid), " uid=%u", ch->uid);
     }
 
@@ -526,7 +547,7 @@ change_line(const struct vg_change *ch, char *out, size_t size)
                  "source=%s%s%s", ch->seq, ch->time_ms,
                  ch->kind < sizeof(kinds) / sizeof(kinds[0])
                  ? kinds[ch->kind] : "unknown",
-                 ch->socket ? "socket" : "self", uid, cause);
+                 vg_source_name(ch->source), uid, cause);
 
     if (ch->kind == VG_CHANGE_BLOCK || ch->kind == VG_CHANGE_UNBLOCK) {
         vg_cidr_to_str(&ch->cidr, cidr, sizeof(cidr));
@@ -675,7 +696,7 @@ vg_ctl_server_listen(const char *path, const char *group, char *err,
 
 
 void
-vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int readonly)
+vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int mode)
 {
     char                    *nl;
     uid_t                    uid;
@@ -745,23 +766,33 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int readonly)
             continue;
         }
 
-        if (readonly && !cmd->read) {
+        if (mode == VG_CTL_READ && !cmd->read) {
             snprintf(reply, sizeof(reply), "error: read-only socket\n");
+            break;
+        }
+
+        /* the ban socket: blocks that expire, nothing else */
+        if (mode == VG_CTL_BAN && !ban_allowed(cmd, req + len)) {
+            snprintf(reply, sizeof(reply),
+                     "error: denied: the ban socket takes only "
+                     "drop <cidr> ttl=<seconds>\n");
             break;
         }
 
         /* the changes a command causes are its caller's */
         uid = (uid_t) -1;
 
-        if (!readonly) {
+        if (mode != VG_CTL_READ) {
             (void) sw_sock_peer(cfd, NULL, &uid, NULL);
-            vg_ctrl_caller(ctrl, 1, (uint32_t) uid);
+            vg_ctrl_caller(ctrl, mode == VG_CTL_BAN ? VG_SOURCE_BAN
+                                                    : VG_SOURCE_SOCKET,
+                           (uint32_t) uid);
         }
 
         reply[0] = 0;
         cmd->handler(ctrl, cmd->prefix ? req + len : NULL, reply,
                      cmd->page ? sizeof(reply) : VG_REPLY_SIZE);
-        vg_ctrl_caller(ctrl, 0, 0);
+        vg_ctrl_caller(ctrl, VG_SOURCE_SELF, 0);
         break;
     }
 

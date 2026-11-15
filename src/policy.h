@@ -37,8 +37,17 @@ enum vg_change_kind {
     VG_CHANGE_RELOAD
 };
 
-/* One change. A change made by a command on the control socket is that
- * caller's (socket, its uid); voidgate's own are "self".
+/* Where a change came from: voidgate itself, a command on the control
+ * socket, or a drop on the ban socket (Seawall proposal 0012 §2).
+ */
+enum vg_source {
+    VG_SOURCE_SELF = 0,
+    VG_SOURCE_SOCKET,
+    VG_SOURCE_BAN
+};
+
+/* One change. A change made by a command on the control or ban socket is
+ * that caller's (its source and uid); voidgate's own are "self".
  */
 struct vg_change {
     uint64_t                seq;        /* 1, 2, ... since start; 0 unused */
@@ -49,7 +58,7 @@ struct vg_change {
     uint32_t                reason;
     uint32_t                uid;
     uint8_t                 kind;
-    uint8_t                 socket;     /* source: 1 socket, 0 self */
+    uint8_t                 source;     /* enum vg_source */
     char                    cause[22];  /* "wake-threshold", "expired"... */
 };
 
@@ -110,7 +119,8 @@ struct vg_ctrl {
     uint64_t                epoch;          /* drawn at start, never 0 */
     uint64_t                seq;            /* the last change's */
     struct vg_change       *changes;        /* VG_CHANGES, by seq */
-    int                     caller_socket;  /* a socket command runs */
+    int                     caller_source;  /* enum vg_source: whose
+                                               command runs */
     uint32_t                caller_uid;
 };
 
@@ -129,10 +139,13 @@ int vg_ctrl_undrop(struct vg_ctrl *c, const struct vg_cidr *p);
 int vg_ctrl_prune_protected(struct vg_ctrl *c);
 
 /*
- * The control socket's caller while its command runs: the changes it
- * causes are its own. vg_ctrl_caller(c, 0, 0) after, back to "self".
+ * A socket's caller while its command runs: the changes it causes are its
+ * own. vg_ctrl_caller(c, VG_SOURCE_SELF, 0) after, back to "self".
  */
-void vg_ctrl_caller(struct vg_ctrl *c, int socket, uint32_t uid);
+void vg_ctrl_caller(struct vg_ctrl *c, int source, uint32_t uid);
+
+/* "self", "socket" or "ban" */
+const char *vg_source_name(int source);
 
 /* Record a reload that went through (the caller's, if a command's). */
 void vg_ctrl_reloaded(struct vg_ctrl *c);

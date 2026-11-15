@@ -128,11 +128,12 @@ clean:
 # default in share/voidgate: an install never replaces the operator's,
 # and each machine gets its own interface. The unit runs
 # /usr/local/seawall/sbin/voidgate whatever PREFIX is. The unit gives the
-# control socket to the group voidgate (-g), and the read-only one to
-# sw_monitor (-R), from the seawall repo; without them (checked unless
+# control socket to the group voidgate (-g), the read-only one to
+# sw_monitor (-R) and the ban socket to voidgate_ban (-B), from the
+# seawall repo; without them (checked unless
 # staging into DESTDIR) the unit would not start, so nothing is installed.
 install: all install-lua
-	[ -n "$(DESTDIR)" ] || for g in voidgate sw_monitor; do \
+	[ -n "$(DESTDIR)" ] || for g in voidgate sw_monitor voidgate_ban; do \
 		getent group $$g >/dev/null || { \
 		echo "group $$g missing: install seawall first" >&2; \
 		exit 1; }; done

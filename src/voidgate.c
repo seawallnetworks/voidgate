@@ -50,8 +50,9 @@ static volatile sig_atomic_t g_stop;
 /* the process that removes the control socket if it exits early */
 static pid_t vg_sock_owner;
 
-/* the read-only socket (-R) is ours to remove too */
+/* the read-only (-R) and ban (-B) sockets are ours to remove too */
 static int vg_monitor_sock;
+static int vg_ban_sock;
 
 static void
 on_signal(int sig)
@@ -71,6 +72,10 @@ sock_unlink(void)
         if (vg_monitor_sock) {
             unlink(VG_MONITOR_SOCK_PATH);
         }
+
+        if (vg_ban_sock) {
+            unlink(VG_BAN_SOCK_PATH);
+        }
     }
 }
 
@@ -88,11 +93,14 @@ usage(const char *argv0)
 {
     fprintf(stderr,
             "usage: %s [-d] [-s stop] [-c config] [-i iface] [-g group]"
-            " [-R group] [-v|-vv]\n"
+            " [-R group] [-B group] [-v|-vv]\n"
             "  -g group  the control socket " VG_SOCK_PATH "'s group\n"
             "  -R group  also listen on " VG_MONITOR_SOCK_PATH ", read-only\n"
             "            (status, stats, drops, changes, blocks), for "
-            "this group\n",
+            "this group\n"
+            "  -B group  also listen on " VG_BAN_SOCK_PATH ", for this "
+            "group:\n"
+            "            drop <cidr> ttl=<seconds> only, for ban clients\n",
             argv0);
 }
 
@@ -303,7 +311,8 @@ main(int argc, char **argv)
     const char *iface_ov = NULL;
     const char *ctl_group = NULL;
     const char *ro_group = NULL;
-    int opt, ctl_fd, ro_fd = -1, http_fd = -1;
+    const char *ban_group = NULL;
+    int opt, ctl_fd, ro_fd = -1, ban_fd = -1, http_fd = -1;
     int daemon_mode = 0, stop_mode = 0, log_fd = -1, ready_fd = -1;
     int result = 0;
     int pid_fd;
@@ -313,7 +322,7 @@ main(int argc, char **argv)
 
     sw_log_init("voidgate");
 
-    while ((opt = getopt(argc, argv, "c:i:g:R:ds:hv")) != -1) {
+    while ((opt = getopt(argc, argv, "c:i:g:R:B:ds:hv")) != -1) {
         switch (opt) {
         case 'c':
             cfg_path = optarg;
@@ -326,6 +335,9 @@ main(int argc, char **argv)
             break;
         case 'R':
             ro_group = optarg;
+            break;
+        case 'B':
+            ban_group = optarg;
             break;
         case 'v':
             if (vg_verbose < 2) {
@@ -404,6 +416,18 @@ main(int argc, char **argv)
         vg_monitor_sock = 1;
     }
 
+    if (ban_group != NULL) {
+        ban_fd = vg_ctl_server_listen(VG_BAN_SOCK_PATH, ban_group, err,
+                                      sizeof(err));
+
+        if (ban_fd < 0) {
+            unlink(cfg.pid_file);
+            sw_log_fatal("ban socket %s", err);
+        }
+
+        vg_ban_sock = 1;
+    }
+
     if (iface_ov != NULL) {
         snprintf(cfg.interface, sizeof(cfg.interface), "%s", iface_ov);
     }
@@ -477,6 +501,10 @@ main(int argc, char **argv)
                     ro_group);
     }
 
+    if (ban_fd >= 0) {
+        sw_log_info("ban socket %s, group %s", VG_BAN_SOCK_PATH, ban_group);
+    }
+
     http_fd = vg_http_listen(cfg.metrics_port);
 
     if (http_fd >= 0) {
@@ -513,7 +541,7 @@ main(int argc, char **argv)
 
     clock_gettime(CLOCK_MONOTONIC, &last_tick);
     while (!g_stop) {
-        struct pollfd pfd[3];
+        struct pollfd pfd[4];
         int nfds = 0, pr, wait_ms;
         struct timespec now;
         long elapsed;
@@ -532,6 +560,12 @@ main(int argc, char **argv)
 
         if (ro_fd >= 0) {
             pfd[nfds].fd = ro_fd;
+            pfd[nfds].events = POLLIN;
+            nfds++;
+        }
+
+        if (ban_fd >= 0) {
+            pfd[nfds].fd = ban_fd;
             pfd[nfds].events = POLLIN;
             nfds++;
         }
@@ -570,8 +604,14 @@ main(int argc, char **argv)
 
                 sw_sock_timeouts(cfd, VG_SOCK_TIMEOUT_MS);
 
-                if (pfd[i].fd == ctl_fd || pfd[i].fd == ro_fd) {
-                    vg_ctl_server_handle(&ctrl, cfd, pfd[i].fd == ro_fd);
+                if (pfd[i].fd == ctl_fd) {
+                    vg_ctl_server_handle(&ctrl, cfd, VG_CTL_FULL);
+
+                } else if (pfd[i].fd == ro_fd) {
+                    vg_ctl_server_handle(&ctrl, cfd, VG_CTL_READ);
+
+                } else if (pfd[i].fd == ban_fd) {
+                    vg_ctl_server_handle(&ctrl, cfd, VG_CTL_BAN);
 
                 } else {
                     vg_http_handle(&ctrl, cfd);
@@ -600,6 +640,11 @@ main(int argc, char **argv)
     if (ro_fd >= 0) {
         close(ro_fd);
         unlink(VG_MONITOR_SOCK_PATH);
+    }
+
+    if (ban_fd >= 0) {
+        close(ban_fd);
+        unlink(VG_BAN_SOCK_PATH);
     }
 
     if (http_fd >= 0) {

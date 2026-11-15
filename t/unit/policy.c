@@ -28,6 +28,7 @@ static void test_drop_log(void);
 static void test_pool(void);
 static void test_changes(void);
 static void test_changes_wrap(void);
+static void test_changes_ban(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
 static int log_count(const char *path, const char *needle);
@@ -870,15 +871,17 @@ test_changes(void)
     }
 
     /* a socket's drop, the gate idle: the arm is the caller's too */
-    vg_ctrl_caller(&c, 1, 1000);
+    vg_ctrl_caller(&c, VG_SOURCE_SOCKET, 1000);
     assert(vg_ctrl_drop(&c, &p[0], VG_REASON_MANUAL) == 0);
-    vg_ctrl_caller(&c, 0, 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
     assert(c.seq == 2);
     ch = vg_ctrl_change(&c, 1);
-    assert(ch->kind == VG_CHANGE_ARM && ch->socket && ch->uid == 1000);
+    assert(ch->kind == VG_CHANGE_ARM && ch->source == VG_SOURCE_SOCKET
+           && ch->uid == 1000);
     assert(strcmp(ch->cause, "manual-drop") == 0 && ch->time_ms > 0);
     ch = vg_ctrl_change(&c, 2);
-    assert(ch->kind == VG_CHANGE_BLOCK && ch->socket && ch->uid == 1000);
+    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_SOCKET
+           && ch->uid == 1000);
     assert(ch->id == 1 && ch->reason == VG_REASON_MANUAL && ch->expires == 0);
     assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
 
@@ -887,7 +890,8 @@ test_changes(void)
      */
     assert(vg_ctrl_drop_ttl(&c, &p[1], 60) == 0);
     ch = vg_ctrl_change(&c, 3);
-    assert(ch->kind == VG_CHANGE_BLOCK && !ch->socket && ch->id == 2);
+    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_SELF
+           && ch->id == 2);
     assert(ch->reason == VG_REASON_TIMED && ch->expires > time(NULL));
     assert(vg_ctrl_drop_ttl(&c, &p[1], 600) == 0);
     ch = vg_ctrl_change(&c, 4);
@@ -911,9 +915,9 @@ test_changes(void)
     assert(c.refused_full == 3 && c.seq == 6);
 
     /* the lift logs the pending lines first */
-    vg_ctrl_caller(&c, 1, 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SOCKET, 0);
     assert(vg_ctrl_undrop(&c, &p[0]) == 0);
-    vg_ctrl_caller(&c, 0, 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
     log_stop(saved);
     assert(log_count(path, "refused 3 drops: drop list full (4)") == 1);
     assert(log_count(path, "refused:") == 0);
@@ -921,7 +925,7 @@ test_changes(void)
     unlink(path);
 
     ch = vg_ctrl_change(&c, 7);
-    assert(ch->kind == VG_CHANGE_UNBLOCK && ch->socket && ch->uid == 0);
+    assert(ch->kind == VG_CHANGE_UNBLOCK && ch->source == VG_SOURCE_SOCKET && ch->uid == 0);
     assert(strcmp(ch->cause, "undrop") == 0 && ch->id == 1);
     assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
 
@@ -936,7 +940,7 @@ test_changes(void)
 
     for (s = 8; s <= 10; s++) {
         ch = vg_ctrl_change(&c, s);
-        assert(ch->kind == VG_CHANGE_UNBLOCK && !ch->socket);
+        assert(ch->kind == VG_CHANGE_UNBLOCK && ch->source == VG_SOURCE_SELF);
         assert(strcmp(ch->cause, "expired") == 0);
     }
 
@@ -964,7 +968,7 @@ test_changes(void)
 
     assert(vg_ctrl_disarm(&c, "attack cleared") == 0);
     ch = vg_ctrl_change(&c, 15);
-    assert(ch->kind == VG_CHANGE_DISARM && !ch->socket);
+    assert(ch->kind == VG_CHANGE_DISARM && ch->source == VG_SOURCE_SELF);
     assert(strcmp(ch->cause, "attack-cleared") == 0);
     assert(c.seq == 15 && vg_ctrl_change(&c, 16) == NULL);
 
@@ -975,6 +979,45 @@ test_changes(void)
 /* Only the last VG_CHANGES are kept; an older one is gone, and the epoch
  * differs from another start's.
  */
+/*
+ * A ban client's drop on an idle gate arms it: the arm and the block are
+ * that client's, source "ban", the arm's cause "ban".
+ */
+static void
+test_changes_ban(void)
+{
+    struct vg_config         cfg;
+    struct vg_ctrl           c;
+    struct vg_cidr           p;
+    const struct vg_change  *ch;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.drop_map_size = 2;
+    cfg.wake_pps = 0;
+    cfg.wake_mbps = 0;
+    nitems = 0;
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+
+    p = v4(198, 18, 13, 1, 32);
+    vg_ctrl_caller(&c, VG_SOURCE_BAN, 33);
+    assert(vg_ctrl_drop_ttl(&c, &p, 60) == 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
+
+    ch = vg_ctrl_change(&c, 1);
+    assert(ch->kind == VG_CHANGE_ARM && ch->source == VG_SOURCE_BAN
+           && ch->uid == 33 && strcmp(ch->cause, "ban") == 0);
+    ch = vg_ctrl_change(&c, 2);
+    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_BAN
+           && ch->uid == 33 && ch->reason == VG_REASON_TIMED);
+    assert(strcmp(vg_source_name(VG_SOURCE_BAN), "ban") == 0
+           && strcmp(vg_source_name(VG_SOURCE_SOCKET), "socket") == 0
+           && strcmp(vg_source_name(VG_SOURCE_SELF), "self") == 0);
+
+    vg_ctrl_free(&c);
+}
+
+
 static void
 test_changes_wrap(void)
 {
@@ -1196,6 +1239,7 @@ main(void)
     test_pool();
     test_changes();
     test_changes_wrap();
+    test_changes_ban();
     test_blocks_pages();
     puts("control-plane regression tests passed");
 

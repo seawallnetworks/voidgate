@@ -164,9 +164,11 @@ voidgatectl -s /run/voidgate-monitor.sock changes
   seq=3 time=1763150000123 kind=block source=socket uid=0 id=1 cidr=198.18.0.1/32 reason=manual expires=0
   ```
 
-  `source=socket` is a command on the control socket, with the caller's
-  uid (`SO_PEERCRED`); a change the command causes, such as the arm before
-  a manual drop, is the caller's too. `source=self` is voidgate's own:
+  `source=socket` is a command on the control socket, `source=ban` a
+  drop on the ban socket (below), both with the caller's uid
+  (`SO_PEERCRED`); a change the command causes, such as the arm before
+  a drop on an idle gate (`cause=manual-drop`, or `cause=ban`), is the
+  caller's too. `source=self` is voidgate's own:
   the wake threshold, policy and aggregate drops, timed lifts (`cause=
   expired`). `disarm` lifts every block, in one change. `more=1`: read
   again from the last seq.
@@ -207,14 +209,23 @@ sudo make install-lua                     # /usr/local/seawall/openresty/site/lu
 sudo make install-lua LUA_DIR=/opt/lualib
 ```
 
-nginx workers do not run as root. The shipped unit runs `voidgate -g
-voidgate`, so `/run/voidgate.sock` is `0660 root:voidgate`; the group
-comes from the seawall repo, which `make install` needs first. Add the
-workers' user to it and restart the gateway:
+nginx workers do not run as root. `M.ban()` and `M.ban_now()` talk to
+the ban socket, `/run/voidgate-ban.sock` (Seawall proposal 0012 §2),
+which the shipped unit opens with `-B voidgate_ban`: `0660
+root:voidgate_ban`, the group from the seawall repo, which `make
+install` needs first. It takes only `drop <cidr> ttl=<seconds>`, and
+refuses everything else (`error: denied: ...`): a gateway or an
+application server that faces the internet, if compromised, can add
+blocks that expire, and can't disarm the gate, reload it or lift a
+block. Add the workers' user to the group and restart the gateway:
 
 ```sh
-sudo usermod -aG voidgate kong
+sudo usermod -aG voidgate_ban kong
 ```
+
+An application banning directly, not through a gateway, joins the same
+group. Its changes are `source=ban` with its uid, so several ban
+clients are told apart.
 
 | Gateway | Common worker user, group | Set by |
 | --- | --- | --- |
@@ -225,18 +236,22 @@ sudo usermod -aG voidgate kong
 That table is for a master started as root, which drops the workers to the
 `user` directive. A master started as an ordinary user (for example
 `openresty -p ~/work` as `ubuntu`) ignores `user` and runs its workers as
-itself: add that user. Members get the whole protocol, disarm and reload
-included. A worker user many services share, such as `nobody`, would
-bring them all in: give the gateway a user of its own, or pass the
-workers' group to `-g` instead (`systemctl edit voidgate`). `-g` takes
-effect at start; reload keeps the socket's group.
+itself: add that user. A worker user many services share, such as
+`nobody`, would bring them all in: give the gateway a user of its own, or
+pass the workers' group to `-B` instead (`systemctl edit voidgate`). `-B`
+takes effect at start; reload keeps the socket's group.
 
 Check the real group with `ps -eo user,group,args | grep 'worker process'`.
 If the gateway runs in a container with the socket bind-mounted, the
 container's worker must have the same numeric gid as the group on the host.
-Members of that group get the whole protocol, `disarm` and `reload`
-included. A group missing from `/etc/group`, or a failed chown, stops the
-start before voidgate touches the NIC.
+A group missing from `/etc/group`, or a failed chown, stops the start
+before voidgate touches the NIC.
+
+The client's methods (`status`, `disarm`, `drop` and the rest, through
+`M.new()`) use the control socket, `/run/voidgate.sock`, `0660
+root:voidgate` (`-g voidgate`). Its members get the whole protocol,
+`disarm` and `reload` included: as good as root over voidgate. Join
+`voidgate` only a program that really needs that.
 
 ### Banning from a request
 
