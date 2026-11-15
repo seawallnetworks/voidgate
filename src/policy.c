@@ -734,17 +734,22 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
 }
 
 
+/*
+ * Unarmed first, then the drops flushed: a failed commit changes nothing,
+ * so the drop list, and the change stream, still say what is in force.
+ */
 int
 vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
 {
     log_drops(c);
-    vg_drop_flush(c->maps);
-    drops_reset(c);
 
     if (vg_cfg_commit(c->maps, 0, c->cfg) < 0) {
         sw_log_warn("disarm cfg commit failed: %s", strerror(errno));
         return -1;
     }
+
+    vg_drop_flush(c->maps);
+    drops_reset(c);
 
     c->state = VG_IDLE;
     c->quiet_since = 0;

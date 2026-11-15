@@ -41,6 +41,7 @@ static struct vg_cidr deleted;
 static int deleted_count;
 static int del_fail;        /* vg_drop_del fails with EIO */
 static int add_fail;        /* vg_drop_add fails with ENOSPC */
+static int commit_fail;     /* vg_cfg_commit fails with EIO */
 static int complete_scan = 1;
 static int nitems;
 static struct {
@@ -92,6 +93,11 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
     (void) m;
     (void) armed;
     (void) cfg;
+
+    if (commit_fail) {
+        errno = EIO;
+        return -1;
+    }
 
     return 0;
 }
@@ -946,6 +952,16 @@ test_changes(void)
     cfg.local_cidr_count = 0;
 
     assert(vg_ctrl_drop(&c, &p[4], VG_REASON_POLICY) == 0);
+
+    /* a disarm that can't unarm changes nothing: the drops stay listed,
+     * and no change says otherwise
+     */
+    commit_fail = 1;
+    assert(vg_ctrl_disarm(&c, "attack cleared") < 0);
+    commit_fail = 0;
+    assert(c.state == VG_ACTIVE && c.drop_count == 1 && c.seq == 14);
+    assert(vg_ctrl_block_after(&c, 0) != NULL);
+
     assert(vg_ctrl_disarm(&c, "attack cleared") == 0);
     ch = vg_ctrl_change(&c, 15);
     assert(ch->kind == VG_CHANGE_DISARM && !ch->socket);
