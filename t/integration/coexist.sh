@@ -138,7 +138,9 @@ xdp-filter unload test0 --all
 # makes the dispatcher, the other joins it. A hook taken between
 # voidgate's look and its attach is looked at again, not given up for
 # TC. The other one starts a little later each time, across voidgate's
-# start.
+# start. The race is quiet: the kernel's refusal of the attempt that
+# lost isn't logged, since the next one works.
+: > "$work/log/voidgate.log"
 for attempt in $(seq 20); do
     delay=$(printf '0.%03d' $((attempt * 40)))
     ( sleep "$delay"; xdp-filter load -m skb test0 ) &
@@ -155,6 +157,10 @@ for attempt in $(seq 20); do
     xdp-filter unload test0 --all 2>/dev/null || true
     [[ -z $(xdp_id) ]]
 done
+if grep -E 'libbpf|libxdp' "$work/log/voidgate.log" >&2; then
+    echo "both at once: libbpf's or libxdp's messages logged" >&2
+    false
+fi
 
 # Another program holds the hook: it stays, and voidgate goes to tcx.
 ip link set dev test0 xdpgeneric obj pass.bpf.o sec xdp

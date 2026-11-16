@@ -244,6 +244,21 @@ grep -q 'armed (ban, ban uid 65534)' "$work/log/voidgate.log"
 stop_daemon
 [[ ! -e /run/voidgate-ban.sock ]]
 
+# The XDP attach is tried quietly (a race with mfwd's is retried and
+# works), but a real refusal still logs the kernel's reason: a dummy
+# interface's driver has no native XDP, so auto falls back to skb.
+ip link add dum0 type dummy
+ip link set dum0 up
+sed 's/^xdp_mode = .*/xdp_mode = auto/' base.conf > auto.conf
+: > "$work/log/voidgate.log"
+start_daemon -c auto.conf -i dum0
+grep -q 'libbpf: .*Kernel error message' "$work/log/voidgate.log"
+grep -q 'native XDP attach failed (.*), falling back to skb' \
+    "$work/log/voidgate.log"
+[[ $("$root/voidgatectl" status | tail -1) == *hook=xdp-skb* ]]
+stop_daemon
+ip link del dum0
+
 # A restart draws another epoch.
 start_daemon -c base.conf -R nogroup
 [[ $(ro changes) =~ ^epoch=([0-9a-f]{16})\ seq=0 ]]

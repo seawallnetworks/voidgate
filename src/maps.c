@@ -319,6 +319,7 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
          * an MTU over 3498.
          */
         if (err && try_auto && err != -EBUSY && err != -EEXIST) {
+            sw_bpf_quiet_replay();
             sw_log_warn("native XDP attach failed (%s), falling back to skb",
                         strerror(-err));
             err = attach_xdp(m, cfg, XDP_MODE_SKB);
@@ -328,7 +329,9 @@ vg_attach(struct vg_maps *m, const struct vg_config *cfg)
             return 0;
         }
 
+        /* a real failure: the kernel's reason, or the verifier's log */
         if (err != -EBUSY && err != -EEXIST) {
+            sw_bpf_quiet_replay();
             sw_log_warn("XDP attach failed: %s", strerror(-err));
             return -1;
         }
@@ -523,7 +526,15 @@ attach_xdp(struct vg_maps *m, const struct vg_config *cfg,
      */
     xdp_program__set_xdp_frags_support(xp, true);
 
+    /*
+     * Quiet: an attach racing another libxdp user's (mfwd starting with
+     * voidgate) fails or is retried by libxdp, and works, but libbpf has
+     * already printed the kernel's refusal. vg_attach() replays what it
+     * printed when the attach really failed.
+     */
+    sw_bpf_quiet(1);
     err = xdp_program__attach(xp, m->ifindex, mode, 0);
+    sw_bpf_quiet(0);
 
     if (err) {
         xdp_program__close(xp);
