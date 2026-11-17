@@ -106,6 +106,13 @@ t/unit/cidr: t/unit/cidr.c src/config.o src/ipaddr.o src/log.o $(LIBSW_A)
 	$(CC) $(CFLAGS) -MF t/unit/cidr.d -o $@ t/unit/cidr.c src/config.o \
 		src/ipaddr.o src/log.o $(LIBSW_A)
 
+# What the XDP program costs a frame, idle and armed (BPF_PROG_TEST_RUN,
+# needs root to run): not in all
+t/bench/idle-cost: t/bench/idle-cost.c $(BPFDIR)/voidgate.skel.h \
+	$(BPFDIR)/voidgate.h
+	$(CC) $(CFLAGS) -MF t/bench/idle-cost.d -o $@ t/bench/idle-cost.c \
+		$(LDFLAGS)
+
 # Unit tests, then verdicts: real daemon + t/*.t (needs root), once for
 # each hook, so XDP and TC judge the same frames alike.
 test: all
@@ -118,6 +125,7 @@ test: all
 
 clean:
 	rm -f voidgate voidgatectl t/unit/policy t/unit/cidr t/unit/*.d \
+		t/bench/idle-cost t/bench/*.d \
 		src/*.o src/*.d \
 		$(BPFDIR)/voidgate.bpf.o $(BPFDIR)/voidgate.bpf.d \
 		$(BPFDIR)/voidgate.skel.h

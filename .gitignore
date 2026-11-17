@@ -2,6 +2,7 @@ voidgate
 voidgatectl
 t/unit/policy
 t/unit/cidr
+t/bench/idle-cost
 *.o
 *.d
 *~

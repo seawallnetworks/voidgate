@@ -98,6 +98,7 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | `integration/reply.sh` | with sw_flowd: its table bound when voidgate starts after it (not before), kept across a restart of sw_flowd; a download survives an armed gate, a flood from its server is blocked, manual blocks win; a table of another layout is refused (`VG_HOOK=tc`: at TC); skips without sw_flowd (`SW_FLOWD`, or `../sw_flowd/sw_flowd`) |
 | `integration/coexist.sh` | sharing the XDP hook: libxdp's dispatcher, TC when another program holds it, leftovers of a killed daemon; skips without clang + xdp-tools |
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
+| `bench/idle-cost.c` | ns a frame of the XDP program, idle and armed, with and without sw_flowd's table, by `BPF_PROG_TEST_RUN`: `make t/bench/idle-cost && sudo t/bench/idle-cost` |
 
 `make test` runs `t/unit/policy` and `t/unit/cidr`, then `sudo t/bin/run` three times:
 at XDP, at tcx (`VG_HOOK=tc`) and at classic TC (`VG_HOOK=tc SW_NO_TCX=1`). The integration
