@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Integration: replies to the host's own flows (Seawall proposal 0015),
 # with sw_flowd recording them at egress, its table bound when
-# voidgate starts. A download from the peer arms the gate and survives
-# it, a manual block of its server too; a flood from the same address is
-# still dropped; without sw_flowd's table the download gets its server
-# banned, as before. VG_HOOK=tc judges at TC ingress. Needs
-# sw_flowd built (SW_FLOWD, or ../sw_flowd/sw_flowd); skips without it.
+# voidgate starts. A download from the peer doesn't wake the gate: its
+# replies are counted apart (Seawall proposal 0017 §1); through an armed
+# gate it survives, a manual block of its server too; a flood from the
+# same address is still dropped; without sw_flowd's table the download
+# wakes the gate and gets its server banned, as before. VG_HOOK=tc
+# judges at TC ingress. Needs sw_flowd built (SW_FLOWD, or
+# ../sw_flowd/sw_flowd); skips without it.
 # Runs in private namespaces (t/bin/create_env.sh).
 set -euo pipefail
 . "$(dirname "$0")/../bin/create_env.sh"
@@ -49,8 +51,9 @@ fail() {
     exit 1
 }
 
-# The download arms the gate (wake_mbps) and is over threshold_mbps on
-# its own, as the incident in 0015 had it; nothing else wakes it.
+# The download is over wake_mbps and over threshold_mbps on its own, as
+# the incident in 0015 had it; with sw_flowd's table it wakes nothing,
+# without it, it does.
 write_conf() {
     cat > "$CONF" <<EOF
 interface = test0
@@ -275,12 +278,27 @@ grep -q "reading sw_flowd's flow table" "$LOG" \
 "$CTL" -r status | grep -q 'flows=sw_flowd' || fail "expected status flows=sw_flowd"
 echo "ok - voidgate started after sw_flowd reads its table"
 
+# in bytes: at xdp-skb a GRO'd skb is one frame of many segments
+for addr in 198.51.100.1 2001:db8::1; do
+    replies=$(stat rx_reply_bytes)
+    got=$(download $addr)
+    [[ $got == "$SIZE" ]] || fail "idle download from $addr got $got of $SIZE"
+    sleep 0.5
+    [[ $(stat state) == idle ]] \
+        || fail "a download from $addr woke the gate"
+    (( $(stat rx_reply_bytes) - replies >= SIZE )) \
+        || fail "the replies from $addr were not counted while idle"
+done
+(( $(stat wake_rx_pps) < 1000 )) || fail "expected wake_rx_pps to stay low"
+echo "ok - a download doesn't wake the gate: its replies are counted apart"
+
+"$CTL" arm > /dev/null
 got=$(download 198.51.100.1)
 [[ $got == "$SIZE" ]] || fail "download got $got of $SIZE bytes"
-[[ $(stat state) == active ]] || fail "the download should have armed the gate"
+[[ $(stat state) == active ]] || fail "the gate should be armed"
 blocked 198.51.100.1/32 && fail "the download got its server blocked"
 (( $(stat reply_passed) > 0 )) || fail "expected reply_passed > 0"
-echo "ok - a download that arms the gate completes, its server not dropped"
+echo "ok - a download through an armed gate completes, its server not dropped"
 
 flood
 sleep 0.5
@@ -313,9 +331,9 @@ got=$(download 198.51.100.1)
 [[ $got == "$SIZE" ]] || fail "download under a manual block got $got"
 echo "ok - a flow the host opens survives a manual block of its server"
 
-# the download armed the gate; the server is still dropped: its echo
+# the gate is still armed; the server is still dropped: its echo
 # replies are the host's own (Seawall proposal 0015 §2)
-[[ $(stat state) == active ]] || fail "the download should have armed the gate"
+[[ $(stat state) == active ]] || fail "the gate should still be armed"
 ping -c 1 -W 2 198.51.100.1 > /dev/null \
     || fail "ping to a dropped server got no reply"
 echo "ok - so do the echo replies of the host's ping"
@@ -435,6 +453,8 @@ start_vg
 "$CTL" unblock 198.51.100.1/32 > /dev/null 2>&1 || true
 download 198.51.100.1 > /dev/null
 sleep 0.5
+[[ $(stat state) == active ]] || fail "without the table a download wakes the gate"
+(( $(stat rx_reply_pkts) == 0 )) || fail "without the table no reply is counted"
 blocked 198.51.100.1/32 || fail "without the table the server should be blocked"
 echo "ok - after sw_flowd -P, a restarted voidgate runs without the table"
 

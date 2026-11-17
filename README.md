@@ -18,8 +18,14 @@ BPF LPM drop tree.
 ```
 IDLE  ── wake_pps / wake_mbps ──► ACTIVE ── quiet clear_seconds ──► IDLE
          cfg.armed = 0                 cfg.armed = 1
-         parse: no                     parse + LPM drop + counters
+         parse: only with sw_flowd     parse + LPM drop + counters
 ```
+
+The wake thresholds compare received traffic less the replies to flows
+the host opened itself (`rx_reply_pkts`, `rx_reply_bytes`), found in
+sw_flowd's table, so the host's own downloads don't arm the gate (Seawall
+proposal 0017 §1); idle, the data path parses each frame for that only
+while the table is bound, and nothing without it.
 
 ## Requirements
 
@@ -353,7 +359,8 @@ The full table is in `doc/l7-bridge.md` §9.
 Operations return `nil, error` on connection, timeout, or daemon errors.
 CIDR validity is checked by the daemon; the client only rejects a CIDR
 that contains whitespace. `stats()` keeps `rx_pkts`, `rx_bytes`, `passed`,
-`dropped`, `non_ip`, `map_full`, `parse_err` and `reply_passed` as strings
+`dropped`, `non_ip`, `map_full`, `parse_err`, `reply_passed`,
+`rx_reply_pkts` and `rx_reply_bytes` as strings
 to avoid precision loss. A block's `reason` is `manual`, `policy`, `aggregate` or
 `timed`; `id`, `inserted` and `expires` (Unix seconds) are numbers.
 `expires` is a timed block's lift time, else 0: a manual block never
@@ -386,7 +393,8 @@ from the log phase. It skips when neither `openresty` nor `nginx` is in
 - Control plane inserts attacker `/32`/`/128` (and aggregates to
   `/24`/`/64` when dense). It will not install a prefix that covers the
   VM itself or the allow list.
-- When the flood is gone for `clear_seconds` and the drop tree is empty,
+- When the flood, less the host's own replies, is gone for
+  `clear_seconds` and the drop tree is empty,
   it disarms. Remote LRU maps are **not** wiped (no cheap BPF clear);
   rates are re-baselined on the next arm.
 

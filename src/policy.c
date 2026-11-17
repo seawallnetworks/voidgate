@@ -1132,10 +1132,20 @@ vg_ctrl_tick(struct vg_ctrl *c)
                       ? m.rx_bytes - c->last_m.rx_bytes : 0;
         uint64_t dd = m.dropped >= c->last_m.dropped
                       ? m.dropped - c->last_m.dropped : 0;
+        uint64_t drp = m.rx_reply_pkts >= c->last_m.rx_reply_pkts
+                       ? m.rx_reply_pkts - c->last_m.rx_reply_pkts : 0;
+        uint64_t drb = m.rx_reply_bytes >= c->last_m.rx_reply_bytes
+                       ? m.rx_reply_bytes - c->last_m.rx_reply_bytes : 0;
 
         c->rx_pps = (double) dp / dt;
         c->rx_bps = (double) db * 8.0 / dt;
         drop_pps = (double) dd / dt;
+
+        /* the host's own downloads don't wake the gate, nor keep it
+         * from going quiet (Seawall proposal 0017 §1)
+         */
+        c->wake_rx_pps = (double) (dp > drp ? dp - drp : 0) / dt;
+        c->wake_rx_bps = (double) (db > drb ? db - drb : 0) * 8.0 / dt;
     }
 
     c->last_m = m;
@@ -1146,11 +1156,13 @@ vg_ctrl_tick(struct vg_ctrl *c)
     }
 
     if (c->state == VG_IDLE) {
-        vg_vvlog("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f",
-                 "idle", c->rx_pps, c->rx_bps / 1e6);
+        vg_vvlog("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
+                 "wake_rx(pps)=%-8.0f wake_rx(Mbps)=%-6.1f",
+                 "idle", c->rx_pps, c->rx_bps / 1e6,
+                 c->wake_rx_pps, c->wake_rx_bps / 1e6);
 
-        if (c->rx_pps > (double) c->cfg->wake_pps
-            || c->rx_bps > (double) c->cfg->wake_mbps * 1000000.0)
+        if (c->wake_rx_pps > (double) c->cfg->wake_pps
+            || c->wake_rx_bps > (double) c->cfg->wake_mbps * 1000000.0)
         {
             vg_ctrl_arm(c, "wake threshold");
         }
@@ -1162,11 +1174,12 @@ vg_ctrl_tick(struct vg_ctrl *c)
     expire_drops(c);
 
     sw_log_debug("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
-                 "dropped(pps)=%-8.0f blocked=%d",
-                 "active", c->rx_pps, c->rx_bps / 1e6, drop_pps, c->drop_count);
+                 "wake_rx(pps)=%-8.0f dropped(pps)=%-8.0f blocked=%d",
+                 "active", c->rx_pps, c->rx_bps / 1e6, c->wake_rx_pps,
+                 drop_pps, c->drop_count);
 
-    if (c->rx_pps < (double) c->cfg->wake_pps
-        && c->rx_bps < (double) c->cfg->wake_mbps * 1000000.0)
+    if (c->wake_rx_pps < (double) c->cfg->wake_pps
+        && c->wake_rx_bps < (double) c->cfg->wake_mbps * 1000000.0)
     {
         if (c->quiet_since == 0) {
             c->quiet_since = time(NULL);

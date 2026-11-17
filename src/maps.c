@@ -742,6 +742,7 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
 
     memset(&bc, 0, sizeof(bc));
     bc.armed = armed;
+    bc.flows = m->flows_fd >= 0;
 
     if (cfg != NULL) {
         bc.allow_port_count = (uint16_t) cfg->allow_port_count;

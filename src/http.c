@@ -53,9 +53,17 @@ format_prometheus(struct vg_ctrl *c, const struct vg_metrics *m, char *buf,
     n += snprintf(buf + n, buflen - (size_t) n,
                   "# TYPE voidgate_reply_passed_packets_total counter\n"
                   "voidgate_reply_passed_packets_total %llu\n"
+                  "# TYPE voidgate_rx_reply_packets_total counter\n"
+                  "voidgate_rx_reply_packets_total %llu\n"
+                  "# TYPE voidgate_rx_reply_bytes_total counter\n"
+                  "voidgate_rx_reply_bytes_total %llu\n"
+                  "# TYPE voidgate_wake_rx_pps gauge\n"
+                  "voidgate_wake_rx_pps %.0f\n"
                   "# TYPE voidgate_flow_table_attached gauge\n"
                   "voidgate_flow_table_attached %d\n",
                   (unsigned long long) m->reply_passed,
+                  (unsigned long long) m->rx_reply_pkts,
+                  (unsigned long long) m->rx_reply_bytes, c->wake_rx_pps,
                   c->maps->flows_fd >= 0 ? 1 : 0);
 
     if (n < 0 || (size_t) n >= buflen

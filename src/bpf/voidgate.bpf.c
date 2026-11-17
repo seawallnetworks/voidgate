@@ -3,7 +3,12 @@
  *
  * IDLE (cfg.armed == 0, or no cfg):
  *   every frame                                 → count rx and passed, PASS
- *   nothing is parsed or looked up.
+ *   nothing else is judged. With sw_flowd's table bound (cfg.flows), each
+ *   frame is parsed and looked up there too, only to count the replies to
+ *   the host's own flows, which don't wake the gate (Seawall 0017 §1);
+ *   without it, nothing is parsed or looked up.
+ *
+ * Both states count those replies in rx_reply_*, whatever the verdict.
  *
  * ACTIVE (cfg.armed == 1), first match wins:
  *   1. whitelist                                → count, PASS
@@ -59,6 +64,11 @@ static __always_inline int v6_hop_limit(void *data, void *data_end,
     __u16 l3_off);
 static __always_inline int is_reply(const struct vg_cfg *c, int rc,
     const struct pkt_meta *pm, void *ctx, int hook);
+static __always_inline void reply_count(struct vg_metrics *m, __u64 pkts,
+    __u64 bytes);
+static __always_inline void idle_replies(void *data, void *data_end,
+    const struct vg_cfg *c, struct vg_metrics *m, __u64 pkts,
+    __u64 pkt_len, void *ctx, int hook);
 
 /* Userspace ARRAY[1]: armed and allow_ports. XDP reads. */
 struct {
@@ -464,7 +474,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
     struct pkt_meta pm;
     __u16 sport, dport;
     __u8 icmp6_type;
-    int rc, local = -1;
+    int rc, local, reply;
 
     rc = pkt_parse(data, data_end, &pm);
 
@@ -502,6 +512,14 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         __builtin_memcpy(&saddr, pm.addr_src, 4);
         __builtin_memcpy(&daddr, pm.addr_dst, 4);
 
+        /* before the allow checks: a reply is counted whatever passes it */
+        local = v4_in_lpm(&local_v4, daddr);
+        reply = c->flows && local && is_reply(c, rc, &pm, ctx, hook);
+
+        if (reply) {
+            reply_count(m, pkts, pkt_len);
+        }
+
         if (v4_in_lpm(&allow_v4, saddr) || v4_in_lpm(&allow_v4, daddr)) {
             goto v4_count;
         }
@@ -518,11 +536,8 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v4_count;
         }
 
-        local = v4_in_lpm(&local_v4, daddr);
-
         /* not counted against its source, which it would get banned */
-        if (local && is_reply(c, rc, &pm, ctx, hook))
-        {
+        if (reply) {
             host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
 
             m->reply_passed += pkts;
@@ -538,10 +553,6 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
 
         v4_count:
-
-        if (local < 0) {
-            local = v4_in_lpm(&local_v4, daddr);
-        }
 
         if (local) {
             host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
@@ -561,6 +572,14 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
          */
         __builtin_memcpy(saddr.addr, pm.addr_src, 16);
         __builtin_memcpy(daddr.addr, pm.addr_dst, 16);
+
+        /* before the exemptions: a reply is counted whatever passes it */
+        local = v6_in_lpm(&local_v6, daddr.addr);
+        reply = c->flows && local && is_reply(c, rc, &pm, ctx, hook);
+
+        if (reply) {
+            reply_count(m, pkts, pkt_len);
+        }
 
         if (v6_is_linklocal(saddr.addr) || v6_is_linklocal(daddr.addr)
             || v6_is_mcast_link(saddr.addr) || v6_is_mcast_link(daddr.addr))
@@ -596,10 +615,7 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v6_count;
         }
 
-        local = v6_in_lpm(&local_v6, daddr.addr);
-
-        if (local && is_reply(c, rc, &pm, ctx, hook))
-        {
+        if (reply) {
             host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
 
             m->reply_passed += pkts;
@@ -617,10 +633,6 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
 
         v6_count:
-
-        if (local < 0) {
-            local = v6_in_lpm(&local_v6, daddr.addr);
-        }
 
         if (local) {
             host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
@@ -643,6 +655,57 @@ rx_count(struct vg_metrics *m, __u64 pkts, __u64 bytes)
 {
     m->rx_pkts += pkts;
     m->rx_bytes += bytes;
+}
+
+
+static __always_inline void
+reply_count(struct vg_metrics *m, __u64 pkts, __u64 bytes)
+{
+    m->rx_reply_pkts += pkts;
+    m->rx_reply_bytes += bytes;
+}
+
+
+/* An idle gate judges nothing, but counts the replies to the host's own
+ * flows among what it passes, as an armed one does in vg_judge(), so they
+ * don't wake it (Seawall proposal 0017 §1). Only a fully parsed frame
+ * can be one, as is_reply() says.
+ */
+static __always_inline void
+idle_replies(void *data, void *data_end, const struct vg_cfg *c,
+    struct vg_metrics *m, __u64 pkts, __u64 pkt_len, void *ctx, int hook)
+{
+    struct pkt_meta pm;
+    int rc;
+
+    rc = pkt_parse(data, data_end, &pm);
+
+    if (rc != PKT_OK) {
+        return;
+    }
+
+    if (pm.family == PKT_V4) {
+        __be32 daddr;
+
+        __builtin_memcpy(&daddr, pm.addr_dst, 4);
+
+        if (!v4_in_lpm(&local_v4, daddr)) {
+            return;
+        }
+
+    } else {
+        struct vg_ip6 daddr;
+
+        __builtin_memcpy(daddr.addr, pm.addr_dst, 16);
+
+        if (!v6_in_lpm(&local_v6, daddr.addr)) {
+            return;
+        }
+    }
+
+    if (is_reply(c, rc, &pm, ctx, hook)) {
+        reply_count(m, pkts, pkt_len);
+    }
 }
 
 
@@ -676,7 +739,17 @@ voidgate_xdp(struct xdp_md *ctx)
 
     c = get_cfg();
 
-    if (c == NULL || c->armed == 0) {
+    if (c == NULL) {
+        m->passed++;
+
+        return XDP_PASS;
+    }
+
+    if (c->armed == 0) {
+        if (c->flows) {
+            idle_replies(data, data_end, c, m, 1, pkt_len, ctx, VG_HOOK_XDP);
+        }
+
         m->passed++;
 
         return XDP_PASS;
@@ -717,7 +790,7 @@ voidgate_tc(struct __sk_buff *ctx)
 
     c = get_cfg();
 
-    if (c == NULL || c->armed == 0) {
+    if (c == NULL || (c->armed == 0 && !c->flows)) {
         m->passed += pkts;
 
         return TC_ACT_UNSPEC;
@@ -738,6 +811,13 @@ voidgate_tc(struct __sk_buff *ctx)
         bpf_skb_pull_data(ctx, want);
         data = (void *) (long) ctx->data;
         data_end = (void *) (long) ctx->data_end;
+    }
+
+    if (c->armed == 0) {
+        idle_replies(data, data_end, c, m, pkts, ctx->len, ctx, VG_HOOK_TC);
+        m->passed += pkts;
+
+        return TC_ACT_UNSPEC;
     }
 
     if (vg_judge(data, data_end, c, m, pkts, ctx->len, ctx, VG_HOOK_TC)

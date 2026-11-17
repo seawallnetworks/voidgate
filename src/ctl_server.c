@@ -147,9 +147,11 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
 
     snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
+             "wake_rx_pps=%.0f wake_rx_bps=%.0f "
              "blocked=%d degraded=%d iface=%s hook=%s flows=%s\n",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
+             ctrl->wake_rx_pps, ctrl->wake_rx_bps,
              ctrl->drop_count, ctrl->maps->degraded,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
              ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
@@ -170,7 +172,8 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
 
     snprintf(reply, reply_size,
              "rx_pkts=%llu rx_bytes=%llu passed=%llu dropped=%llu "
-             "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu\n",
+             "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu "
+             "rx_reply_pkts=%llu rx_reply_bytes=%llu\n",
              (unsigned long long) m.rx_pkts,
              (unsigned long long) m.rx_bytes,
              (unsigned long long) m.passed,
@@ -178,7 +181,9 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
              (unsigned long long) m.non_ip,
              (unsigned long long) m.map_full,
              (unsigned long long) m.parse_err,
-             (unsigned long long) m.reply_passed);
+             (unsigned long long) m.reply_passed,
+             (unsigned long long) m.rx_reply_pkts,
+             (unsigned long long) m.rx_reply_bytes);
 }
 
 

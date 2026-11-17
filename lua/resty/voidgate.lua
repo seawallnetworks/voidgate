@@ -30,6 +30,7 @@ local MAX_TTL = 31536000    -- one year, as the daemon
 local counters = {
     rx_pkts = true, rx_bytes = true, passed = true, dropped = true,
     non_ip = true, map_full = true, parse_err = true, reply_passed = true,
+    rx_reply_pkts = true, rx_reply_bytes = true,
 }
 
 -- One command per connection: the daemon replies and closes.

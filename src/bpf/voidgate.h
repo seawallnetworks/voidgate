@@ -53,6 +53,12 @@ struct vg_metrics {
                           both addresses are readable, else passed */
     __u64  reply_passed;  /* armed, a reply to a flow the host opened:
                              passed, not counted against its source */
+    __u64  rx_reply_pkts;   /* of rx_pkts, replies to a flow the host
+                               opened, idle and armed, whatever the
+                               verdict; 0 without sw_flowd's table.
+                               rx less these is what wakes the gate
+                               (Seawall proposal 0017 §1) */
+    __u64  rx_reply_bytes;  /* L2 bytes of rx_reply_pkts */
 };
 
 
@@ -61,6 +67,8 @@ struct vg_cfg {
     __u16  allow_ports[VG_MAX_ALLOW_PORTS];
     __u16  allow_port_count;
     __u64  reply_idle_ns;  /* a flow idle longer is not looked up */
+    __u32  flows;          /* sw_flowd's table is bound: replies are
+                              looked up, idle too */
 };
 
 

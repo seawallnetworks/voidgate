@@ -22,12 +22,16 @@ Contents:
 The data plane is one BPF program that only ever returns `XDP_PASS` or
 `XDP_DROP`; no packet goes to userspace. The daemon is the control plane:
 it polls coarse rx counters and, when a wake threshold trips, arms the
-gate, counts sources and installs CIDRs into an LPM drop tree.
+gate, counts sources and installs CIDRs into an LPM drop tree. The
+thresholds compare rx less the replies to flows the host opened itself
+(`rx_reply_pkts`, `rx_reply_bytes`), so a fast download or `apt update`
+doesn't arm the gate; with sw_flowd's table bound, the idle data path
+parses each frame to count them, and without it, nothing is subtracted.
 
 | State | Data plane does | Leaves when |
 | --- | --- | --- |
-| IDLE (`armed=0`) | Counts `rx_pkts` / `rx_bytes`, passes everything | rx exceeds `wake_pps` or `wake_mbps` |
-| ACTIVE (`armed=1`) | Parses IPv4/IPv6, drops prefixes in the drop trees, passes replies to the host's own flows, counts sources | rx below both wake thresholds for `clear_seconds` and the drop tree is empty |
+| IDLE (`armed=0`) | Counts `rx_pkts` / `rx_bytes`, and with sw_flowd the replies among them, passes everything | rx less replies exceeds `wake_pps` or `wake_mbps` |
+| ACTIVE (`armed=1`) | Parses IPv4/IPv6, drops prefixes in the drop trees, passes replies to the host's own flows, counts sources | rx less replies below both wake thresholds for `clear_seconds` and the drop tree is empty |
 
 An armed gate passes replies to flows the host opened itself (a download,
 an update, a DNS query, a ping) and never counts them against their
@@ -155,8 +159,8 @@ its comments.
 | `hook` | `auto` | `auto`: XDP, falling back to TC if a non-dispatcher program holds the hook. `xdp`: fail instead. `tc`: always TC. | restart |
 | `log_file` | `/var/log/voidgate.log` | Append-only log with `-d` only; in the foreground (the unit) the log is the journal. The parent directory must exist. | restart |
 | `pid_file` | `/run/voidgate.pid` | Locked for the daemon's life; `-s stop` reads it. | restart |
-| `wake_pps` | `2000` | Aggregate NIC packets/s that arms the gate. | reload |
-| `wake_mbps` | `25` | Aggregate NIC Mbit/s that arms the gate. Either one arms. | reload |
+| `wake_pps` | `2000` | Aggregate NIC packets/s, less replies to the host's own flows, that arms the gate. | reload |
+| `wake_mbps` | `25` | Aggregate NIC Mbit/s, less those replies, that arms the gate. Either one arms. | reload |
 | `idle_poll_ms` | `1000` | Userspace tick in ms; `<= 0` becomes 1000. | reload |
 | `clear_seconds` | `30` | Quiet seconds, with an empty drop tree, before ACTIVE returns to IDLE. | reload |
 | `threshold_pps` | `500` | Per-source packets/s that earns a `/32` or `/128` block. Keep below `wake_pps`. | reload |
@@ -267,8 +271,8 @@ active      1        1         0   eth0  xdp-native  sw_flowd
 
 | Command | Effect | Typical answer |
 | --- | --- | --- |
-| `status` | The gate's state: rates, `blocked`, the hook; `flows` is `sw_flowd` while its table is read, `none` without it, when a first line `CRITICAL: …` says so, until voidgate restarts with it. `voidgatectl status` prints it as a table without the rates, which `stats` shows | `-r status`: `state=idle armed=0 rx_pps=… rx_bps=… blocked=0 degraded=0 iface=eth0 hook=xdp-native flows=sw_flowd` |
-| `stats [<interval> [<count>]]` | The data path's counters. `voidgatectl stats` reads `status` too and prints both as one row, `status`'s `CRITICAL` line first; a key the daemon doesn't give shows `-`. With an interval, a row every `<interval>` seconds, as `mpstat` | see below; `-r stats`, the counters alone: `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
+| `status` | The gate's state: rates, `blocked`, the hook; `flows` is `sw_flowd` while its table is read, `none` without it, when a first line `CRITICAL: …` says so, until voidgate restarts with it. `voidgatectl status` prints it as a table without the rates, which `stats` shows | `-r status`: `state=idle armed=0 rx_pps=… rx_bps=… wake_rx_pps=… wake_rx_bps=… blocked=0 degraded=0 iface=eth0 hook=xdp-native flows=sw_flowd` |
+| `stats [<interval> [<count>]]` | The data path's counters. `voidgatectl stats` reads `status` too and prints both as one row, `status`'s `CRITICAL` line first; a key the daemon doesn't give shows `-`. With an interval, a row every `<interval>` seconds, as `mpstat` | see below; `-r stats`, the counters alone: `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=… rx_reply_pkts=… rx_reply_bytes=…` |
 | `blocks [after <id>]` | What is blocked now, 256 a page, oldest first. `voidgatectl blocks` reads every page and prints a table, `(none)` when empty; its `expires` is a timed block's lift time, `never` for a manual one, `ban_time` for policy and aggregate ones (`ban_time` seconds after `since`) | `-r blocks`: `epoch=… seq=N n=K next=<id>\|end`, then `id=N cidr=C reason=R inserted=<s> expires=<s>` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
 | `disarm` | Lift every block, back to IDLE | `ok` |
@@ -298,9 +302,11 @@ and `rx_bps`, `dropped` and `drop%`). Up to 99999 a number is exact; above, it h
 k, M, G, T or P (powers of 1000). `rx_bps` is bits per second; `drop%`
 is `dropped` out of `rx_pkts`. `blocked` is how many addresses and ranges
 are blocked now; `voidgatectl blocks` lists them. The errors,
-`map_full` and `parse_err`, follow the row when not 0; `non_ip` and
-`reply_passed`, normal traffic, are only in `-r stats`, which has every
-digit:
+`map_full` and `parse_err`, follow the row when not 0; `non_ip`,
+`reply_passed`, `rx_reply_pkts` and `rx_reply_bytes`, normal traffic, are
+only in `-r stats`, which has every digit. `status`'s `wake_rx_pps` and
+`wake_rx_bps` are the rates the wake thresholds compare, rx less the
+replies to the host's own flows:
 
 ```
 $ voidgatectl stats
@@ -333,12 +339,14 @@ Prometheus, when `metrics_port` is positive, is
 | --- | --- | --- |
 | `voidgate_armed` | gauge | 1 for longer than an attack should last |
 | `voidgate_degraded` | gauge | 1: judging at TC, not XDP |
-| `voidgate_rx_pps` | gauge | trend; set `wake_pps` from its normal peak |
+| `voidgate_rx_pps` | gauge | trend: all received traffic, the host's own replies included |
 | `voidgate_rx_packets_total`, `voidgate_rx_bytes_total` | counter | target down (no scrape) |
 | `voidgate_dropped_packets_total` | counter | rate > 0 means an attack is being cut |
 | `voidgate_blocked` | gauge | near `drop_map_size` |
 | `voidgate_map_full_total` | counter | any increase: the drop tree or source map is full |
 | `voidgate_reply_passed_packets_total` | counter | trend: replies to the host's own flows an armed gate passed |
+| `voidgate_rx_reply_packets_total`, `voidgate_rx_reply_bytes_total` | counter | trend: replies to the host's own flows received, idle or armed; not counted for waking |
+| `voidgate_wake_rx_pps` | gauge | trend; the rate `wake_pps` compares: set it from this one's normal peak |
 | `voidgate_flow_table_attached` | gauge | 0: sw_flowd wasn't running when voidgate started |
 | `voidgate_flow_table_entries`, `voidgate_flow_table_size` | gauge | entries near size: raise sw_flowd's `table_size` |
 | `voidgate_flow_table_evicted_total` | counter | sustained increase: the table is too small |
@@ -354,7 +362,8 @@ During an attack:
    itself).
 3. If a legitimate client was caught, `voidgatectl unblock <cidr>` and add
    its range to `allow_networks`, then `reload`.
-4. After the flood, the gate disarms itself once rx stays below both wake
+4. After the flood, the gate disarms itself once rx, less the host's own
+   replies, stays below both wake
    thresholds for `clear_seconds` and every block has expired. Manual
    blocks keep it armed until you `unblock` them or `disarm`.
 

@@ -29,6 +29,7 @@ static void test_pool(void);
 static void test_feed(void);
 static void test_feed_wrap(void);
 static void test_feed_ban(void);
+static void test_wake_replies(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
 static int log_count(const char *path, const char *needle);
@@ -133,11 +134,15 @@ vg_populate_local(struct vg_maps *m, const struct vg_config *cfg)
 }
 
 
+/* What the data path's counters read: 0, unless a test sets them. */
+static struct vg_metrics  stub_metrics;
+
+
 int
 vg_metrics_read(struct vg_maps *m, struct vg_metrics *out)
 {
     (void) m;
-    memset(out, 0, sizeof(*out));
+    *out = stub_metrics;
 
     return 0;
 }
@@ -977,6 +982,67 @@ test_feed(void)
 }
 
 
+/*
+ * Replies to the host's own flows don't wake the gate, nor keep it from
+ * going quiet (Seawall proposal 0017 §1): wake_* compare rx less them.
+ * Each tick is about a second, its counters stub_metrics's increments.
+ */
+static void
+wake_tick(struct vg_ctrl *c, uint64_t pkts, uint64_t replies)
+{
+    stub_metrics.rx_pkts += pkts;
+    stub_metrics.rx_bytes += pkts * 1500;
+    stub_metrics.rx_reply_pkts += replies;
+    stub_metrics.rx_reply_bytes += replies * 1500;
+
+    assert(tick(c) == 0);
+}
+
+
+static void
+test_wake_replies(void)
+{
+    struct vg_config  cfg;
+    struct vg_ctrl    c;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.wake_pps = 2000;
+    cfg.wake_mbps = 1000;
+    nitems = 0;
+    complete_scan = 1;
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+    c.last_m = stub_metrics;
+
+    /* a download: 5000 pps, all but 100 of them replies, stays idle */
+    wake_tick(&c, 5000, 4900);
+    assert(c.state == VG_IDLE);
+    assert(c.rx_pps > 4900 && c.rx_pps < 5100);
+    assert(c.wake_rx_pps > 90 && c.wake_rx_pps < 110);
+
+    /* the same rate, 4000 of it not replies, wakes it */
+    wake_tick(&c, 5000, 1000);
+    assert(c.state == VG_ACTIVE);
+    assert(c.wake_rx_pps > 3900 && c.wake_rx_pps < 4100);
+
+    /* armed, a download alone is quiet; the flood again is not */
+    wake_tick(&c, 5000, 4990);
+    assert(c.quiet_since != 0);
+    wake_tick(&c, 5000, 0);
+    assert(c.quiet_since == 0);
+
+    /* more replies counted than packets (another CPU's, read apart):
+     * no rate below 0
+     */
+    wake_tick(&c, 10, 20);
+    assert(c.wake_rx_pps == 0 && c.wake_rx_bps == 0);
+
+    vg_ctrl_free(&c);
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+}
+
+
 /* Only the last VG_FEED_SIZE are kept; an older one is gone, and the epoch
  * differs from another start's.
  */
@@ -1241,6 +1307,7 @@ main(void)
     test_feed();
     test_feed_wrap();
     test_feed_ban();
+    test_wake_replies();
     test_blocks_pages();
     puts("control-plane regression tests passed");
 

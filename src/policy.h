@@ -93,8 +93,12 @@ struct vg_ctrl {
     int                     have_last_m;
     struct timespec         last_tick;
     int                     have_last_tick;
-    double                  rx_pps;
+    double                  rx_pps;         /* all received, last tick */
     double                  rx_bps;
+    double                  wake_rx_pps;    /* less replies to the host's
+                                               own flows: what wake_* and
+                                               the quiet time compare */
+    double                  wake_rx_bps;
     time_t                  quiet_since;
     struct vg_drop_rec     *drop_pool;      /* 2 x drop_map_size (v4 + v6) */
     unsigned                drop_pool_cap;
