@@ -3,7 +3,7 @@
 # Integration: replies to the host's own flows (Seawall proposal 0015),
 # with sw_flowd recording them at egress, its table bound when
 # voidgate starts. A download from the peer arms the gate and survives
-# it, a manual drop of its server too; a flood from the same address is
+# it, a manual block of its server too; a flood from the same address is
 # still dropped; without sw_flowd's table the download gets its server
 # banned, as before. VG_HOOK=tc judges at TC ingress. Needs
 # sw_flowd built (SW_FLOWD, or ../sw_flowd/sw_flowd); skips without it.
@@ -43,8 +43,9 @@ trap cleanup EXIT
 
 fail() {
     echo "reply.sh: $*" >&2
-    "$CTL" stats >&2 || true
-    "$CTL" drops >&2 || true
+    "$CTL" -r status >&2 || true
+    "$CTL" -r stats >&2 || true
+    "$CTL" blocks >&2 || true
     exit 1
 }
 
@@ -201,11 +202,12 @@ PY
 }
 
 stat() {
-    "$CTL" stats | tr ' ' '\n' | sed -n "s/^$1=//p"
+    { "$CTL" -r status; "$CTL" -r stats; } | tr ' ' '\n' \
+        | sed -n "s/^$1=//p"
 }
 
-dropped() {
-    "$CTL" drops | grep -q "^$1 "
+blocked() {
+    "$CTL" -r blocks | grep -q " cidr=$1 "
 }
 
 wait_log() {
@@ -252,11 +254,14 @@ start_vg
 [[ $(stat flows) == none ]] || fail "expected flows=none before sw_flowd"
 grep -q '\[CRIT\] no sw_flowd flow table' "$LOG" \
     || fail "expected the no-table line, at crit"
-# a broken install: status and stats say so first (Seawall proposal 0015 §6)
+# a broken install: status says so first, and voidgatectl stats with it
+# (Seawall proposal 0015 §6); the counters alone don't
 "$CTL" status | head -1 | grep -q '^CRITICAL: no sw_flowd flow table' \
     || fail "expected status to start with CRITICAL"
 "$CTL" stats | head -1 | grep -q '^CRITICAL: ' \
-    || fail "expected stats to start with CRITICAL"
+    || fail "expected voidgatectl stats to start with CRITICAL"
+"$CTL" -r stats | grep -q 'CRITICAL' \
+    && fail "the counters should not carry the CRITICAL line"
 start_flowd
 [[ $(stat flows) == none ]] || fail "a running voidgate picked up a new table"
 echo "ok - voidgate started before sw_flowd runs without its table"
@@ -267,46 +272,46 @@ grep -q "reading sw_flowd's flow table" "$LOG" \
     || fail "voidgate did not bind sw_flowd's table at start"
 [[ $(stat flows) == sw_flowd ]] || fail "expected flows=sw_flowd"
 "$CTL" status | grep -q '^CRITICAL' && fail "status CRITICAL with the table"
-"$CTL" status | grep -q 'flows=sw_flowd' || fail "expected status flows=sw_flowd"
+"$CTL" -r status | grep -q 'flows=sw_flowd' || fail "expected status flows=sw_flowd"
 echo "ok - voidgate started after sw_flowd reads its table"
 
 got=$(download 198.51.100.1)
 [[ $got == "$SIZE" ]] || fail "download got $got of $SIZE bytes"
 [[ $(stat state) == active ]] || fail "the download should have armed the gate"
-dropped 198.51.100.1/32 && fail "the download got its server dropped"
+blocked 198.51.100.1/32 && fail "the download got its server blocked"
 (( $(stat reply_passed) > 0 )) || fail "expected reply_passed > 0"
 echo "ok - a download that arms the gate completes, its server not dropped"
 
 flood
 sleep 0.5
-dropped 198.51.100.1/32 || fail "the flood from the same address was not dropped"
-"$CTL" drops | grep -q '^198.51.100.1/32 reason=2 ' \
-    || fail "expected a policy drop of the flooding address"
+blocked 198.51.100.1/32 || fail "the flood from the same address was not blocked"
+"$CTL" -r blocks | grep -q ' cidr=198.51.100.1/32 reason=policy ' \
+    || fail "expected a policy block of the flooding address"
 echo "ok - a flood from the same address is still dropped"
 
 got=$(download 198.51.100.1)
-[[ $got == "$SIZE" ]] || fail "download after the policy drop got $got"
-echo "ok - a flow the host opens survives a policy drop of its server"
+[[ $got == "$SIZE" ]] || fail "download after the policy block got $got"
+echo "ok - a flow the host opens survives a policy block of its server"
 
 got=$(download 2001:db8::1)
 [[ $got == "$SIZE" ]] || fail "IPv6 download got $got of $SIZE bytes"
-dropped 2001:db8::1/128 && fail "the IPv6 download got its server dropped"
+blocked 2001:db8::1/128 && fail "the IPv6 download got its server blocked"
 echo "ok - and over IPv6"
 
 # sw_flowd restarted: the pinned maps stay, and voidgate keeps them
 stop_flowd
 start_flowd
 [[ $(stat flows) == sw_flowd ]] || fail "expected flows=sw_flowd"
-# the server's policy drop is still there: only the table lets this in
+# the server's policy block is still there: only the table lets this in
 got=$(download 198.51.100.1)
 [[ $got == "$SIZE" ]] || fail "download after sw_flowd's restart got $got"
 echo "ok - a restart of sw_flowd needs no restart of voidgate"
 
 # a /30 holds the peer, not this host, and the policy /32 is inside it
-"$CTL" drop 198.51.100.0/30 > /dev/null
+"$CTL" block 198.51.100.0/30 > /dev/null
 got=$(download 198.51.100.1)
-[[ $got == "$SIZE" ]] || fail "download under a manual drop got $got"
-echo "ok - a flow the host opens survives a manual drop of its server"
+[[ $got == "$SIZE" ]] || fail "download under a manual block got $got"
+echo "ok - a flow the host opens survives a manual block of its server"
 
 # the download armed the gate; the server is still dropped: its echo
 # replies are the host's own (Seawall proposal 0015 §2)
@@ -329,7 +334,7 @@ sleep 0.2
     || fail "errors about the host's flow were not passed as replies"
 (( $(stat dropped) - drops < 5 )) \
     || fail "errors about the host's flow were dropped"
-echo "ok - ICMP errors about the host's flow pass its server's drop"
+echo "ok - ICMP errors about the host's flow pass its server's block"
 
 passed=$(stat reply_passed)
 drops=$(stat dropped)
@@ -355,10 +360,10 @@ sleep 0.2
 (( $(stat dropped) - drops < 5 )) \
     || fail "RSTs without ACK on the host's connection were dropped"
 kill "$held" 2> /dev/null; wait "$held" 2> /dev/null || true
-echo "ok - a RST without ACK on the host's connection passes its drop"
+echo "ok - a RST without ACK on the host's connection passes its block"
 
 # classic ntpd listens on 123 and queries from it: sw_flowd's
-# record_udp_ports records it, and its server's answers pass the drop;
+# record_udp_ports records it, and its server's answers pass the block;
 # to 124, not listed, they are dropped (Seawall proposal 0015 §7)
 for port in 123 124; do
     python3 -c "import socket, time
@@ -378,8 +383,8 @@ drops=$(stat dropped)
 udp_from 123 124 50
 sleep 0.2
 (( $(stat dropped) - drops >= 50 )) \
-    || fail "answers to a port not in record_udp_ports passed the drop"
-echo "ok - ntpd's queries from 123 get their answers through a drop; 124's don't"
+    || fail "answers to a port not in record_udp_ports passed the block"
+echo "ok - ntpd's queries from 123 get their answers through a block; 124's don't"
 
 # DHCP is as before 0015: voidgate passes a server's answers, 67 to 68,
 # before its drop lists, a dropped source's too, counted against the
@@ -391,12 +396,12 @@ sleep 0.2
 (( $(stat dropped) - drops < 5 )) || fail "DHCP's answers were dropped"
 (( $(stat reply_passed) - passed < 5 )) \
     || fail "DHCP's answers were passed as replies"
-echo "ok - DHCP's answers pass a drop of their source, as before, not as replies"
-"$CTL" undrop 198.51.100.0/30 > /dev/null
+echo "ok - DHCP's answers pass a block of their source, as before, not as replies"
+"$CTL" unblock 198.51.100.0/30 > /dev/null
 
 # IPv6: the server dropped too, its echo replies and ICMPv6 errors about
 # the host's flow pass; packet too big about no flow doesn't
-"$CTL" drop 2001:db8::1/128 > /dev/null
+"$CTL" block 2001:db8::1/128 > /dev/null
 ping -6 -c 1 -W 2 2001:db8::1 > /dev/null \
     || fail "ping over IPv6 to a dropped server got no reply"
 python3 -c 'import socket
@@ -416,7 +421,7 @@ icmp6_err 2 0 6 50600 443 50
 sleep 0.2
 (( $(stat dropped) - drops >= 50 )) \
     || fail "packet too big about no flow passed a dropped source"
-"$CTL" undrop 2001:db8::1/128 > /dev/null
+"$CTL" unblock 2001:db8::1/128 > /dev/null
 echo "ok - and over IPv6: echo replies, errors about a flow, not without one"
 
 # sw_flowd purged: a voidgate started after that runs without a table,
@@ -427,10 +432,10 @@ stop_vg
 : > "$LOG"
 start_vg
 [[ $(stat flows) == none ]] || fail "expected flows=none after sw_flowd -P"
-"$CTL" undrop 198.51.100.1/32 > /dev/null 2>&1 || true
+"$CTL" unblock 198.51.100.1/32 > /dev/null 2>&1 || true
 download 198.51.100.1 > /dev/null
 sleep 0.5
-dropped 198.51.100.1/32 || fail "without the table the server should be dropped"
+blocked 198.51.100.1/32 || fail "without the table the server should be blocked"
 echo "ok - after sw_flowd -P, a restarted voidgate runs without the table"
 
 # a table of another layout (the config of an older sw_flowd.h) is

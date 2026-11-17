@@ -77,15 +77,16 @@ sudo ./voidgatectl status</code></pre>
                 <aside class="note warn">Edit <code>interface</code> to the VM’s public NIC. Do not point this at a shared management-only interface you cannot afford to XDP-attach. The idle path is <code>XDP_PASS</code>, but attach still requires driver or SKB XDP.</aside>
 
                 <h2>Verify it works</h2>
-                <p>The daemon starts in IDLE. <code>status</code> should show the interface you attached and a nonzero <code>rx_pps</code> once traffic flows. <code>stats</code> shows the raw XDP counters.</p>
+                <p>The daemon starts in IDLE. <code>status</code> should show the interface you attached. <code>stats</code> shows the traffic, a nonzero <code>rx_pps</code> once it flows, and the XDP counters; <code>stats 1</code> its row each second, as <code>mpstat</code>.</p>
                 <div class="term">
                     <div class="term-bar"><i></i><i></i><i></i> /run/voidgate.sock</div>
                     <pre><span class="cmd">$ sudo ./voidgatectl status</span>
-<span class="out">state=idle armed=0 rx_pps=412 rx_bps=2800000 prefixes=0 iface=eth0</span>
+<span class="out">state  armed  blocked  degraded  iface        hook     flows
+ idle      0        0         0   eth0  xdp-native  sw_flowd</span>
 
 <span class="cmd">$ sudo ./voidgatectl stats</span>
-<span class="out">rx_pkts=18240 rx_bytes=12501440 passed=0 dropped=0 non_ip=0 map_full=0 parse_err=0
-rx_pps=412 rx_bps=2800000 state=idle prefixes=0</span></pre>
+<span class="out">           state  blocked  rx_pkts  rx_pps  rx_bytes  rx_bps  passed  dropped   drop%
+14:02:11    idle        0    18240     412     12.5M   2.80M       0        0    0.00</span></pre>
                 </div>
                 <p>In IDLE, <code>passed</code> stays at zero because the program does not parse packets. It only counts <code>rx_*</code> and returns <code>XDP_PASS</code>.</p>
 

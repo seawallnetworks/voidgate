@@ -44,7 +44,7 @@ first (the unit is `After=` and `Wants=sw_flowd.service`). Started
 without it, voidgate judges those replies as any other until it is
 restarted; restarting sw_flowd needs no restart of voidgate, `sw_flowd
 -P` does.
-No drop stops such a flow, a manual one included: a drop keeps out
+No block stops such a flow, a manual one included: a block keeps out
 traffic the host did not ask for, not the replies it did.
 
 Components:
@@ -124,7 +124,7 @@ A gateway or an application that bans through `voidgate.lua`
 (`M.ban()`, `M.ban_now()`) uses the ban socket, `/run/voidgate-ban.sock`
 (`-B voidgate_ban`): add its worker user to the group `voidgate_ban` and
 restart that service: `sudo usermod -aG voidgate_ban kong`. The ban
-socket takes only `drop <address> ttl=<seconds>`, one address: members
+socket takes only `block <address> ttl=<seconds>`, one address: members
 can block single addresses for a while, nothing else.
 
 The control socket, `/run/voidgate.sock` (`-g voidgate`), is for
@@ -159,9 +159,9 @@ its comments.
 | `wake_mbps` | `25` | Aggregate NIC Mbit/s that arms the gate. Either one arms. | reload |
 | `idle_poll_ms` | `1000` | Userspace tick in ms; `<= 0` becomes 1000. | reload |
 | `clear_seconds` | `30` | Quiet seconds, with an empty drop tree, before ACTIVE returns to IDLE. | reload |
-| `threshold_pps` | `500` | Per-source packets/s that earns a `/32` or `/128` drop. Keep below `wake_pps`. | reload |
+| `threshold_pps` | `500` | Per-source packets/s that earns a `/32` or `/128` block. Keep below `wake_pps`. | reload |
 | `threshold_mbps` | `5` | Per-source Mbit/s, same effect. Keep below `wake_mbps`. | reload |
-| `ban_time` | `1900` | Seconds a policy or aggregate drop lives. Manual drops never expire. | reload |
+| `ban_time` | `1900` | Seconds a policy or aggregate block lives. Manual blocks never expire. | reload |
 | `aggregate_k` | `8` | Dropped hosts in one `/24` or `/64` before the whole prefix is dropped. | reload |
 | `local_networks` | (auto) | This VM's CIDRs. Empty takes the NIC's addresses as `/32` and `/128`. Repeated lines add up. Never list the on-link LAN prefix. | reload |
 | `allow_networks` | built-in list | Never-drop CIDRs. A non-empty list replaces the built-in one; it does not merge. Repeated lines add up. | reload |
@@ -200,7 +200,7 @@ Tuning rules:
 A reload with a bad value logs `<file>:<line>: bad value for <key>`,
 answers `error: reload failed` and keeps the running config. An unknown
 key only logs a warning and is skipped. A reload also lifts any installed
-drop, manual ones included, that now covers a `local_*` or `allow_*`
+block, manual ones included, that now covers a `local_*` or `allow_*`
 prefix.
 
 ## 4. Running the service
@@ -230,7 +230,7 @@ Command-line options of `voidgate`:
 | `-g <group>` | Give `/run/voidgate.sock` (mode `0660`) to this group. Takes effect at start; a group missing from `/etc/group` stops the start. |
 | `-d` | Detach. Waits for startup, prints the daemon PID to stderr, and exits nonzero if startup fails. |
 | `-s stop` | Send SIGTERM to the daemon in `pid_file` and wait for it. |
-| `-v`, `-vv` | Debug lines: every tick while armed, each drop and expiry, libbpf's and libxdp's info; `-vv` also each remote source and idle tick. |
+| `-v`, `-vv` | Debug lines: every tick while armed, each block and expiry, libbpf's and libxdp's info; `-vv` also each remote source and idle tick. |
 | `-h` | Usage. |
 
 Outside systemd, for a test host:
@@ -254,34 +254,77 @@ daemon's program from the NIC.
 
 `voidgatectl` sends one command to `/run/voidgate.sock` and prints the
 answer; it exits 1 when the daemon answers `error: ...`, so it is safe in
-scripts.
+scripts. `status`, `stats` and `blocks` are printed as tables, see below;
+`-r` prints the daemon's answer as is, the `key=value` words a script
+should read. The table below shows the daemon's answers:
+
+```
+$ voidgatectl status
+ state  armed  blocked  degraded  iface        hook     flows
+active      1        1         0   eth0  xdp-native  sw_flowd
+```
+
 
 | Command | Effect | Typical answer |
 | --- | --- | --- |
-| `status` | State summary; `flows` as in `stats`. Without sw_flowd's table, a first line `CRITICAL: …` says so, until voidgate restarts with it | `state=idle armed=0 rx_pps=… rx_bps=… prefixes=0 iface=eth0 hook=xdp-native degraded=0 flows=sw_flowd` |
-| `stats` | Data-plane counters and rates; `flows` is `sw_flowd` while its table is read, `none` without it, when a `CRITICAL: …` first line says so, as in `status` | `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
-| `drops` | Installed prefixes with reason and age | one line per prefix, or `(none)` |
+| `status` | The gate's state: rates, `blocked`, the hook; `flows` is `sw_flowd` while its table is read, `none` without it, when a first line `CRITICAL: …` says so, until voidgate restarts with it. `voidgatectl status` prints it as a table without the rates, which `stats` shows | `-r status`: `state=idle armed=0 rx_pps=… rx_bps=… blocked=0 degraded=0 iface=eth0 hook=xdp-native flows=sw_flowd` |
+| `stats [<interval> [<count>]]` | The data path's counters. `voidgatectl stats` reads `status` too and prints both as one row, `status`'s `CRITICAL` line first; a key the daemon doesn't give shows `-`. With an interval, a row every `<interval>` seconds, as `mpstat` | see below; `-r stats`, the counters alone: `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=…` |
+| `blocks [after <id>]` | What is blocked now, 256 a page, oldest first. `voidgatectl blocks` reads every page and prints a table, `(none)` when empty; its `expires` is a timed block's lift time, `never` for a manual one, `ban_time` for policy and aggregate ones (`ban_time` seconds after `since`) | `-r blocks`: `epoch=… seq=N n=K next=<id>\|end`, then `id=N cidr=C reason=R inserted=<s> expires=<s>` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
-| `disarm` | Flush the drop tree, back to IDLE | `ok` |
-| `drop <cidr>` | Permanent manual drop (reason 1); arms the gate | `ok` or `error: refused or map update failed` |
-| `drop <cidr> ttl=<sec>` | Timed drop (reason 4), 1 s to one year; a repeat only extends it | `ok` |
-| `undrop <cidr>` | Remove one prefix | `ok` |
+| `disarm` | Lift every block, back to IDLE | `ok` |
+| `block <cidr>` | Permanent manual block (reason 1); arms the gate | `ok` or `error: refused or map update failed` |
+| `block <cidr> ttl=<sec>` | Timed block (reason 4), 1 s to one year; a repeat only extends it | `ok` |
+| `unblock <cidr>` | Lift one block | `ok` |
 | `reload` | Re-read the config | `ok` or `error: reload failed` |
 
-Drop reasons: 1 manual, 2 policy (source over threshold), 3 aggregate
-(`/24` or `/64`), 4 timed (OpenResty bans). The daemon refuses any drop
-that covers `local_networks` or `allow_networks`. `disarm` and a daemon
-restart forget every drop, manual ones included, so re-apply permanent
-drops after a restart.
+Block reasons: `manual` (1), `policy` (2, a source over threshold),
+`aggregate` (3, a `/24` or `/64`), `timed` (4, OpenResty bans). The daemon
+refuses any block that covers `local_networks` or `allow_networks`.
+`disarm` and a daemon restart forget every block, manual ones included,
+so re-apply permanent blocks after a restart.
 
 Daily checks:
 
-1. `voidgatectl status`: expect `state=idle`, `degraded=0`, the right
-   `iface`, `flows=sw_flowd`, and no `CRITICAL` line.
-2. `voidgatectl drops`: review manual drops (reason 1); they never
+1. `voidgatectl status`: expect `state` idle, `degraded` 0, the right
+   `iface`, `flows` sw_flowd, and no `CRITICAL` line.
+2. `voidgatectl blocks`: review the `manual` blocks; they never
    expire.
-3. `voidgatectl stats`: `map_full` and `parse_err` should not be
-   climbing.
+3. `voidgatectl stats`: no `map_full=` or `parse_err=` after the row,
+   or not climbing.
+
+`voidgatectl stats` is one row: the time, the gate now, then each counter since
+voidgate started next to its rate (`rx_pkts` and `rx_pps`, `rx_bytes`
+and `rx_bps`, `dropped` and `drop%`). Up to 99999 a number is exact; above, it has three digits and
+k, M, G, T or P (powers of 1000). `rx_bps` is bits per second; `drop%`
+is `dropped` out of `rx_pkts`. `blocked` is how many addresses and ranges
+are blocked now; `voidgatectl blocks` lists them. The errors,
+`map_full` and `parse_err`, follow the row when not 0; `non_ip` and
+`reply_passed`, normal traffic, are only in `-r stats`, which has every
+digit:
+
+```
+$ voidgatectl stats
+           state  blocked  rx_pkts  rx_pps  rx_bytes  rx_bps  passed  dropped   drop%
+20:30:58  active        1    5.15G    552k      309G    265M   3.98M    5.14G   99.92  map_full=3
+```
+
+`voidgatectl stats <interval> [<count>]` works as `mpstat`: `stats`'s
+row every `<interval>` seconds (1 to 3600). The totals
+are the counters then; `rx_pps`, `rx_bps` and `drop%` are over the
+interval, from the counters' increase, and so are `map_full` and
+`parse_err` after it: errors of this interval, not of long ago. `count` rows, then an `Average:`
+row of those three over the whole run; or until Ctrl-C, which ends it
+without one. When the counters go down, voidgate restarted: a
+`voidgate restarted` row, and the average starts over.
+
+```
+$ voidgatectl stats 1 3
+           state  blocked  rx_pkts  rx_pps  rx_bytes  rx_bps  passed  dropped   drop%
+20:31:02  active        1    5.15G    552k      309G    265M   3.98M    5.14G   99.99
+20:31:03  active        1    5.15G    549k      309G    263M   3.98M    5.14G   99.99  map_full=2
+20:31:04  active        1    5.15G    550k      309G    264M   3.98M    5.14G   99.99
+Average:       -        -        -    550k         -    264M       -        -   99.99
+```
 
 Prometheus, when `metrics_port` is positive, is
 `http://127.0.0.1:9105/metrics`:
@@ -293,7 +336,7 @@ Prometheus, when `metrics_port` is positive, is
 | `voidgate_rx_pps` | gauge | trend; set `wake_pps` from its normal peak |
 | `voidgate_rx_packets_total`, `voidgate_rx_bytes_total` | counter | target down (no scrape) |
 | `voidgate_dropped_packets_total` | counter | rate > 0 means an attack is being cut |
-| `voidgate_drop_prefixes` | gauge | near `drop_map_size` |
+| `voidgate_blocked` | gauge | near `drop_map_size` |
 | `voidgate_map_full_total` | counter | any increase: the drop tree or source map is full |
 | `voidgate_reply_passed_packets_total` | counter | trend: replies to the host's own flows an armed gate passed |
 | `voidgate_flow_table_attached` | gauge | 0: sw_flowd wasn't running when voidgate started |
@@ -305,15 +348,15 @@ exporter textfile, not across the network.
 
 During an attack:
 
-1. `voidgatectl status` and `drops` to see what voidgate has cut.
+1. `voidgatectl status` and `blocks` to see what voidgate has cut.
 2. If a whole range is hostile, add it:
-   `voidgatectl drop 203.0.113.0/24` (or with `ttl=3600` to have it lift
+   `voidgatectl block 203.0.113.0/24` (or with `ttl=3600` to have it lift
    itself).
-3. If a legitimate client was caught, `voidgatectl undrop <cidr>` and add
+3. If a legitimate client was caught, `voidgatectl unblock <cidr>` and add
    its range to `allow_networks`, then `reload`.
 4. After the flood, the gate disarms itself once rx stays below both wake
-   thresholds for `clear_seconds` and every drop has expired. Manual
-   drops keep it armed until you `undrop` them or `disarm`.
+   thresholds for `clear_seconds` and every block has expired. Manual
+   blocks keep it armed until you `unblock` them or `disarm`.
 
 ## 6. Logging and the OpenResty bridge
 
@@ -333,8 +376,9 @@ Lines worth watching for:
 | `attached <prog> on ifindex N` | Startup succeeded |
 | `idle on <iface>, wake_pps=… wake_mbps=…` | Running, gate not armed |
 | `armed (…)` / `disarmed (…)` | Gate state change, with the reason |
-| `dropped <cidr> (<reason>), …; N listed` / `expired <cidr> (<reason>), …; N left` | Prefixes entered or left the drop tree this tick; past 8 in one tick, counts by reason and the first 8 |
-| `refuse drop <cidr> (covers local/allow)` | A drop was blocked to protect the VM or the allow list |
+| `blocked <cidr> (<reason>), …; N listed` / `expired <cidr> (<reason>), …; N left` | Blocks added or lifted this tick; past 8 in one tick, counts by reason and the first 8 |
+| `unblock <cidr>` | A block lifted by `unblock` |
+| `refuse block <cidr> (covers local/allow)` | A block was refused to protect the VM or the allow list |
 | `drop <cidr> refused: drop list full (N)` | `drop_map_size` reached |
 | `degraded: … holds ifindex N's XDP hook …` | Running at TC, not XDP |
 | `reloaded <path>` | A reload took effect |
@@ -361,15 +405,15 @@ restart voidgate afterwards; a reload does not reopen the log. A minimal
 
 The OpenResty bridge lets the gateway decide who is abusive
 (`limit_req`, failed logins, bot rules) and push that address to XDP as a
-timed drop. Install it with `make install-lua`, add the worker user to
+timed block. Install it with `make install-lua`, add the worker user to
 group `voidgate`, and see
 [`contrib/openresty/nginx.conf`](../contrib/openresty/nginx.conf) and
 [`l7-bridge.md`](l7-bridge.md). Operational points:
 
-- Every Lua drop has a ttl; permanent drops are only made with
-  `voidgatectl drop`.
-- Timed drops never count toward `aggregate_k`, so a few bans behind one
-  NAT do not become a `/24` drop.
+- Every Lua block has a ttl; permanent blocks are only made with
+  `voidgatectl block`.
+- Timed blocks never count toward `aggregate_k`, so a few bans behind one
+  NAT do not become a `/24` block.
 - The daemon's answers to `ban()` go to the nginx error log; check it if
   bans seem to do nothing.
 - Check the real worker group with
@@ -379,7 +423,7 @@ group `voidgate`, and see
 ## 7. Maintenance
 
 The only state worth backing up is the config file and your list of
-manual drops; the drop tree lives in BPF maps and is lost on every
+manual blocks; the drop tree lives in BPF maps and is lost on every
 restart.
 
 **Changing the config**
@@ -397,16 +441,16 @@ restart.
 
 **Upgrading**
 
-1. Save manual drops: `voidgatectl drops > /root/voidgate-drops.$(date +%F)`.
+1. Save the blocks: `voidgatectl blocks > /root/voidgate-blocks.$(date +%F)`.
 2. Build and test the new tree: `make && make test`.
 3. `sudo make install` (keeps the live config).
 4. Compare `share/voidgate/voidgate.conf` with your live config for new
    keys; unknown keys only warn, but new defaults may matter.
 5. `sudo systemctl daemon-reload && sudo systemctl restart voidgate`. The
    NIC is unprotected for the short gap between detach and attach.
-6. Re-apply the reason=1 drops you saved with `voidgatectl drop <cidr>`.
-7. Check `voidgatectl status` shows `degraded=0`, the expected `hook`,
-   `flows=sw_flowd`, and no `CRITICAL` line.
+6. Re-apply the `manual` blocks you saved with `voidgatectl block <cidr>`.
+7. Check `voidgatectl status` shows `degraded` 0, the expected `hook`,
+   `flows` sw_flowd, and no `CRITICAL` line.
 
 **Testing before rollout**
 
@@ -420,7 +464,7 @@ restart.
 
 **Periodic tasks**
 
-- [ ] Weekly: review `voidgatectl drops` for stale manual drops
+- [ ] Weekly: review `voidgatectl blocks` for stale manual blocks
 - [ ] Weekly: check `voidgate_map_full_total` and `voidgate_degraded`
 - [ ] Quarterly: re-check `wake_*` and `threshold_*` against normal peak
   traffic
@@ -448,15 +492,15 @@ there.
 | `degraded=1`, `hook=tc` or `tcx` | A non-libxdp program holds the XDP hook (`ip link`, Cilium) | Move that program to libxdp, or accept TC; `hook = xdp` makes this fatal instead |
 | `XDP attach: no bpffs at /sys/fs/bpf` | bpffs not mounted | `mount -t bpf bpf /sys/fs/bpf` |
 | `voidgatectl: connect /run/voidgate.sock: Permission denied` | Caller not root and not in group `voidgate` | `usermod -aG voidgate <user>`, then restart that service |
-| nginx: `voidgate: drop …: permission denied` | The workers' user is not in `voidgate_ban` (after an upgrade: it was in `voidgate`) | `usermod -aG voidgate_ban <user>`, then restart the gateway |
-| `error: denied: the ban socket takes only drop <address> ttl=<seconds>` | A network, a drop without a ttl, or another command on the ban socket | Ban one address with a ttl; a network or anything else goes through the control socket |
+| nginx: `voidgate: block …: permission denied` | The workers' user is not in `voidgate_ban` (after an upgrade: it was in `voidgate`) | `usermod -aG voidgate_ban <user>`, then restart the gateway |
+| `error: denied: the ban socket takes only block <address> ttl=<seconds>` | A network, a block without a ttl, or another command on the ban socket | Ban one address with a ttl; a network or anything else goes through the control socket |
 | `voidgatectl: connect …: No such file or directory` | Daemon down | Start voidgate; read the log |
 | `voidgatectl: connect …: timed out` | voidgate stopped answering (5 s) | `systemctl status voidgate`; read the log |
 | `control socket /run/voidgate.sock: no group "voidgate" in /etc/group` | seawall not installed | Install seawall, or drop `-g voidgate` with `systemctl edit voidgate` |
 | `error: refused or map update failed` on `drop` | The prefix covers `local_*` or `allow_*`, or the drop map is full | Narrow the prefix; check `drops` count against `drop_map_size` |
 | `error: reload failed` | Bad value in the config | Fix the line the log names; the old config keeps running |
-| Gate stays armed after the flood | A drop is still installed (manual drops never expire) | `voidgatectl drops`; `undrop` or `disarm` |
-| Legitimate clients dropped | Shared NAT or proxy over threshold, or aggregation | `undrop`, add the range to `allow_networks`, `reload`; raise `aggregate_k` |
+| Gate stays armed after the flood | A block is still installed (manual blocks never expire) | `voidgatectl blocks`; `unblock` or `disarm` |
+| Legitimate clients blocked | Shared NAT or proxy over threshold, or aggregation | `unblock`, add the range to `allow_networks`, `reload`; raise `aggregate_k` |
 | A download's or update's server dropped; `status` starts with `CRITICAL:` (no sw_flowd flow table, or one of another layout), and the journal has it at `crit` | sw_flowd wasn't running when voidgate started, or its table is of another layout (`flows=none`): a broken install, not a state to run in (Seawall proposal 0015 §6) | Start sw_flowd, then restart voidgate: it binds the table when it starts. After an upgrade, the stack's sw_flowd and voidgate must come from one release |
 | SSH lost during an attack | Port not in `allow_ports`, or SSH on a non-local address | Keep `22` (or your SSH port) in `allow_ports`; check `local_networks` |
 | `map_full` climbing | Too many sources for `remote_map_size` or `drop_map_size` | Lower `aggregate_k` so `/24` and `/64` drops relieve the tree; raise sizes and restart |
@@ -489,19 +533,20 @@ with `-vv` on a test host, and use `bpftool prog show` and
 
 Control protocol: one newline-terminated command per connection (at most
 254 bytes), a text answer, then close. Answers start with `ok`, data, or
-`error:`. The response buffer is 8192 bytes, so a very long `drops` list
-is cut short.
+`error:`. An answer is at most 8192 bytes; a page of `changes` or
+`blocks`, 65536.
 
 Quick commands:
 
 ```
 voidgatectl status
 voidgatectl stats
-voidgatectl drops                       # <cidr> reason=N age=<sec>
-voidgatectl drop 203.0.113.0/24         # permanent
-voidgatectl drop 203.0.113.7 ttl=600    # lifts after 10 minutes
-voidgatectl undrop 203.0.113.0/24
-voidgatectl disarm                      # flush all drops
+voidgatectl stats 1                     # stats each second, as mpstat
+voidgatectl blocks                      # what is blocked, as a table
+voidgatectl block 203.0.113.0/24        # permanent
+voidgatectl block 203.0.113.7 ttl=600   # lifts after 10 minutes
+voidgatectl unblock 203.0.113.0/24
+voidgatectl disarm                      # lift every block
 voidgatectl reload
 curl -s 127.0.0.1:9105/metrics
 ```

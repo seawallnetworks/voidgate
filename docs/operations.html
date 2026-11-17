@@ -55,15 +55,15 @@
                         <tbody>
                             <tr>
                                 <td>status</td>
-                                <td><code>state</code>, <code>armed</code>, <code>rx_pps</code>, <code>rx_bps</code>, drop count, iface</td>
+                                <td><code>state</code>, <code>armed</code>, <code>rx_pps</code>, <code>rx_bps</code>, <code>blocked</code>, iface</td>
                             </tr>
                             <tr>
-                                <td>stats</td>
-                                <td>XDP counters: <code>rx_pkts</code>, <code>passed</code>, <code>dropped</code>, <code>non_ip</code>, <code>map_full</code>, <code>parse_err</code></td>
+                                <td>stats [&lt;interval&gt; [&lt;count&gt;]]</td>
+                                <td>XDP counters only (the state is <code>status</code>'s); <code>voidgatectl stats</code> reads both and prints one row: <code>rx_pkts</code>, <code>passed</code>, <code>dropped</code>, then <code>map_full=</code> and <code>parse_err=</code> when not 0 (<code>non_ip</code> and <code>reply_passed</code> only in <code>-r stats</code>). With an interval, the same row every <code>interval</code> seconds, its <code>rx_pps</code>, <code>rx_bps</code>, <code>drop%</code>, <code>map_full</code> and <code>parse_err</code> over the interval, and, after <code>count</code> rows, an <code>Average:</code> row (none on Ctrl-C), as <code>mpstat</code>. <code>-r stats</code>: the daemon's <code>key=value</code> answer</td>
                             </tr>
                             <tr>
-                                <td>drops</td>
-                                <td>installed prefixes with <code>reason</code> and age</td>
+                                <td>blocks [after &lt;id&gt;]</td>
+                                <td>what is blocked, oldest first, 256 a page: <code>id</code>, <code>cidr</code>, <code>reason</code>, <code>inserted</code>, <code>expires</code>. <code>voidgatectl blocks</code> reads every page and prints a table; <code>-r blocks</code> the daemon's page</td>
                             </tr>
                             <tr>
                                 <td>arm</td>
@@ -71,19 +71,19 @@
                             </tr>
                             <tr>
                                 <td>disarm</td>
-                                <td>flush <code>drop_*</code>, <code>cfg.armed = 0</code>, back to IDLE</td>
+                                <td>lift every block (flush <code>drop_*</code>), <code>cfg.armed = 0</code>, back to IDLE</td>
                             </tr>
                             <tr>
-                                <td>drop &lt;cidr&gt;</td>
+                                <td>block &lt;cidr&gt;</td>
                                 <td>manual insert; forces ACTIVE. Reason 1. Not auto-expired.</td>
                             </tr>
                             <tr>
-                                <td>drop &lt;cidr&gt; ttl=&lt;sec&gt;</td>
-                                <td>timed insert for OpenResty bans; forces ACTIVE. Reason 4. Lifted after <code>ttl</code> (1 s to one year); a re-ban only extends it. Never upgrades a manual drop and never counts toward <code>aggregate_k</code>.</td>
+                                <td>block &lt;cidr&gt; ttl=&lt;sec&gt;</td>
+                                <td>timed insert for OpenResty bans; forces ACTIVE. Reason 4. Lifted after <code>ttl</code> (1 s to one year); a re-ban only extends it. Never upgrades a manual block and never counts toward <code>aggregate_k</code>.</td>
                             </tr>
                             <tr>
-                                <td>undrop &lt;cidr&gt;</td>
-                                <td>remove one prefix from the drop tree</td>
+                                <td>unblock &lt;cidr&gt;</td>
+                                <td>lift one block</td>
                             </tr>
                             <tr>
                                 <td>reload</td>
@@ -92,7 +92,7 @@
                         </tbody>
                     </table>
                 </div>
-                <aside class="note idle"><code>reload</code> does not change the attached interface, XDP mode, map sizes, log or pid file, or the metrics listener. Those are fixed at start. Reload does lift any installed drop, manual ones included, that now covers a <code>local_*</code> or <code>allow_*</code> prefix.</aside>
+                <aside class="note idle"><code>reload</code> does not change the attached interface, XDP mode, map sizes, log or pid file, or the metrics listener. Those are fixed at start. Reload does lift any installed block, manual ones included, that now covers a <code>local_*</code> or <code>allow_*</code> prefix.</aside>
                 <p>Drop reasons: <code>1</code> manual, <code>2</code> policy, <code>3</code> aggregate.</p>
 
                 <h2>Config</h2>
@@ -168,7 +168,7 @@
                             <tr>
                                 <td>threshold_pps</td>
                                 <td><code>500</code></td>
-                                <td>Per-remote packets/s that earns a <code>/32</code> or <code>/128</code> drop. Keep below <code>wake_pps</code>.</td>
+                                <td>Per-remote packets/s that earns a <code>/32</code> or <code>/128</code> block. Keep below <code>wake_pps</code>.</td>
                                 <td class="rl-live">live</td>
                             </tr>
                             <tr>
@@ -180,7 +180,7 @@
                             <tr>
                                 <td>ban_time</td>
                                 <td><code>1900</code></td>
-                                <td>Seconds a policy or aggregate drop lives. Manual drops never expire.</td>
+                                <td>Seconds a policy or aggregate block lives. Manual blocks never expire.</td>
                                 <td class="rl-live">live</td>
                             </tr>
                             <tr>
@@ -253,14 +253,14 @@ voidgate_rx_bytes_total 0
 voidgate_dropped_packets_total 0
 # TYPE voidgate_map_full_total counter
 voidgate_map_full_total 0
-# TYPE voidgate_drop_prefixes gauge
-voidgate_drop_prefixes 0
+# TYPE voidgate_blocked gauge
+voidgate_blocked 0
 # TYPE voidgate_rx_pps gauge
 voidgate_rx_pps 0</code></pre>
                 </div>
 
                 <h2>OpenResty client</h2>
-                <p>voidgate is not a WAF. Let OpenResty, or a gateway built on it such as Kong or APISIX, decide who is abusive and push that address down to XDP with a timed drop. <code>lua/resty/voidgate.lua</code> talks to voidgate over a non-blocking cosocket. <code>ban()</code> and <code>ban_now()</code> use the ban socket, <code>/run/voidgate-ban.sock</code>, which takes only <code>drop &lt;address&gt; ttl=&lt;seconds&gt;</code>, one address: a compromised gateway can't block a range, disarm the gate or lift a block. Install it with <code>sudo make install-lua</code> (OpenResty's site lualib, or set <code>LUA_DIR</code>), and add the worker user to the group <code>voidgate_ban</code>, which the shipped unit gives the ban socket to with <code>-B voidgate_ban</code>, so nginx can reach it: commonly <code>nobody</code> for OpenResty, <code>kong</code> for Kong, and <code>nobody</code> or <code>apisix</code> (Docker image) for APISIX.</p>
+                <p>voidgate is not a WAF. Let OpenResty, or a gateway built on it such as Kong or APISIX, decide who is abusive and push that address down to XDP with a timed block. <code>lua/resty/voidgate.lua</code> talks to voidgate over a non-blocking cosocket. <code>ban()</code> and <code>ban_now()</code> use the ban socket, <code>/run/voidgate-ban.sock</code>, which takes only <code>block &lt;address&gt; ttl=&lt;seconds&gt;</code>, one address: a compromised gateway can't block a range, disarm the gate or lift a block. Install it with <code>sudo make install-lua</code> (OpenResty's site lualib, or set <code>LUA_DIR</code>), and add the worker user to the group <code>voidgate_ban</code>, which the shipped unit gives the ban socket to with <code>-B voidgate_ban</code>, so nginx can reach it: commonly <code>nobody</code> for OpenResty, <code>kong</code> for Kong, and <code>nobody</code> or <code>apisix</code> (Docker image) for APISIX.</p>
                 <div class="code">
                     <div class="code-head">
                         <span>nginx</span>
@@ -279,9 +279,9 @@ location / {
     }
 }</code></pre>
                 </div>
-                <p><code>ban(ip, ttl, opt)</code> works from every phase but <code>init_by_lua*</code>, log included, and sends one ban per address per window. <code>ban_now(ip, ttl)</code> sends at once and returns the daemon's answer, in rewrite, access, content or timer context. Every drop from Lua needs a ttl: a permanent drop is <code>voidgatectl drop</code>'s job. The other methods (<code>status()</code>, <code>stats()</code>, <code>drops()</code>, <code>drop(cidr, ttl)</code>, <code>undrop()</code>, <code>arm()</code>, <code>disarm()</code>, <code>reload()</code>) run in rewrite, access, content or timer context and return <code>nil, err</code> on failure. <code>stats()</code> returns 64-bit counters as decimal strings. They use the control socket, <code>/run/voidgate.sock</code> (group <code>voidgate</code>), the whole protocol: join it only a program that needs that.</p>
+                <p><code>ban(ip, ttl, opt)</code> works from every phase but <code>init_by_lua*</code>, log included, and sends one ban per address per window. <code>ban_now(ip, ttl)</code> sends at once and returns the daemon's answer, in rewrite, access, content or timer context. Every block from Lua needs a ttl: a permanent block is <code>voidgatectl block</code>'s job. The other methods (<code>status()</code>, <code>stats()</code>, <code>blocks()</code>, <code>block(cidr, ttl)</code>, <code>unblock()</code>, <code>arm()</code>, <code>disarm()</code>, <code>reload()</code>) run in rewrite, access, content or timer context and return <code>nil, err</code> on failure. <code>stats()</code> returns 64-bit counters as decimal strings. They use the control socket, <code>/run/voidgate.sock</code> (group <code>voidgate</code>), the whole protocol: join it only a program that needs that.</p>
                 <aside class="note warn">Upgrading from a voidgate without the ban socket: a worker user that joined <code>voidgate</code> can't reach the ban socket, and every ban fails with only a line in nginx's error log. Add it to <code>voidgate_ban</code>, restart the gateway, then take it out of <code>voidgate</code>.</aside>
-                <aside class="note warn">Ban only real peers. Behind a CDN or load balancer, put the proxy ranges in <code>allow_networks</code>, or a forged client-IP header can ban your own front door. Any drop keeps the gate armed until it lifts.</aside>
+                <aside class="note warn">Ban only real peers. Behind a CDN or load balancer, put the proxy ranges in <code>allow_networks</code>, or a forged client-IP header can ban your own front door. Any block keeps the gate armed until it lifts.</aside>
 
                 <h2>ACTIVE policy, short</h2>
                 <p>Each tick, remotes over threshold become <code>/32</code> or <code>/128</code>. Dense clusters become <code>/24</code> or <code>/64</code>. Userspace will not install a prefix that covers the VM itself or the allow list. On disarm, <code>remote_*</code> stays; the next arm re-baselines snapshots so leftover counters are not a phantom flood.</p>

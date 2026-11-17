@@ -38,7 +38,7 @@ t/bin/run
                                      or TC with VG_HOOK=tc
   └─ prove -I t/lib t/
        each block:
-         1. voidgatectl-style reset: disarm (flushes drops), arm, setup cmds
+         1. voidgatectl-style reset: disarm (flushes blocks), arm, setup cmds
          2. frame built from the spec, sent on peer0 via AF_PACKET
          3. stats read before/after: dropped +1 -> XDP_DROP, else XDP_PASS
 ```
@@ -62,10 +62,10 @@ All files share one daemon, configured by [`conf/xdp.conf`](conf/xdp.conf):
 | `local_networks` | `198.51.100.10/32`, `2001:db8::10/128` | the "VM" addresses |
 | `allow_networks` | built-in defaults + `192.0.2.99/32` | allow-list cases |
 | `allow_ports` | `22` | SSH exemption cases |
-| `wake_*`, `threshold_*` | 1e9 | never auto-arms, policy never adds drops |
+| `wake_*`, `threshold_*` | 1e9 | never auto-arms, policy never adds blocks |
 | `clear_seconds` | 86400 | an armed block is never auto-disarmed |
 
-Blocks start from this state and add drops themselves. Conventional
+Blocks start from this state and add blocks themselves. Conventional
 addresses used below: `203.0.113.1` and `2001:db8::bad` are the attacker,
 `198.51.100.8` and `2001:db8::1` are innocent neighbors.
 
@@ -81,7 +81,7 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | &nbsp;&nbsp;`v4.t` | IPv4 drop, SSH and DHCP exemptions, VLAN, fragments, allow list |
 | &nbsp;&nbsp;`v6.t` | IPv6 drop, NDP, SSH and DHCPv6 exemptions |
 | &nbsp;&nbsp;`v6-ext.t` | IPv6 extension-header chains, fragments, truncation |
-| &nbsp;&nbsp;`cidr.t` | CIDR parsing/masking and the local/allow guard, via `drop` |
+| &nbsp;&nbsp;`cidr.t` | CIDR parsing/masking and the local/allow guard, via `block` |
 | `lib/VG/Test.pm` | Test::Base subclass: `run_xdp_blocks`, `run_ctl_blocks` |
 | `lib/VG/Packet.pm` | frame builder and raw-socket sender |
 | `lib/VG/Ctl.pm` | control socket client (`ctl`, `stats`) |
@@ -95,7 +95,7 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | `integration/daemon.sh` | daemon startup, detach, logging, pid file |
 | `integration/resty.sh` | OpenResty client in real nginx (`resty.lua` methods, `ban()`, `-g`); skips without nginx + lua module |
 | `integration/netns.sh` | veth flood: IDLE → ACTIVE wake and drop (`VG_HOOK=tc`: at TC) |
-| `integration/reply.sh` | with sw_flowd: its table bound when voidgate starts after it (not before), kept across a restart of sw_flowd; a download survives an armed gate, a flood from its server is dropped, manual drops win; a table of another layout is refused (`VG_HOOK=tc`: at TC); skips without sw_flowd (`SW_FLOWD`, or `../sw_flowd/sw_flowd`) |
+| `integration/reply.sh` | with sw_flowd: its table bound when voidgate starts after it (not before), kept across a restart of sw_flowd; a download survives an armed gate, a flood from its server is blocked, manual blocks win; a table of another layout is refused (`VG_HOOK=tc`: at TC); skips without sw_flowd (`SW_FLOWD`, or `../sw_flowd/sw_flowd`) |
 | `integration/coexist.sh` | sharing the XDP hook: libxdp's dispatcher, TC when another program holds it, leftovers of a killed daemon; skips without clang + xdp-tools |
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
 
@@ -122,8 +122,8 @@ run_xdp_blocks();
 
 __DATA__
 
-=== TEST 1: UDP sport 68 from dropped src is not a whitelist
---- setup: drop 203.0.113.1/32
+=== TEST 1: UDP sport 68 from blocked src is not a whitelist
+--- setup: block 203.0.113.1/32
 --- packets: ipv4 udp 203.0.113.1:68 > 198.51.100.10:80
 --- verdict: XDP_DROP
 ```
@@ -136,7 +136,7 @@ __DATA__
 | `=== TEST N: name` | yes | test name printed by `prove -v`; `N` is the block's position in the file (see [Numbering](#numbering)) |
 | `--- packets` | yes | one packet spec per line (see below) |
 | `--- verdict` | yes | one `XDP_PASS` / `XDP_DROP` per packet line |
-| `--- setup` | no | control commands, one per line, each must reply `ok` (e.g. `drop <cidr>`, `undrop <cidr>`) |
+| `--- setup` | no | control commands, one per line, each must reply `ok` (e.g. `block <cidr>`, `unblock <cidr>`) |
 | `--- idle` | no | leave the gate disarmed (`armed = 0`) |
 | `--- counters` | no | expected counter deltas summed over the block's packets, e.g. `rx_pkts=1 dropped=0`; only the listed keys are checked |
 
@@ -148,7 +148,7 @@ on the lines after `--- name`:
 
 ```
 === TEST 12: overlong extension chain cannot supply exempt ports
---- setup: drop 2001:db8::bad/128
+--- setup: block 2001:db8::bad/128
 --- packets
 ipv6 tcp [2001:db8::bad]:40000 > [2001:db8::10]:22 ext=hopopts,dstopts*8
 --- verdict: XDP_DROP
@@ -157,8 +157,8 @@ ipv6 tcp [2001:db8::bad]:40000 > [2001:db8::10]:22 ext=hopopts,dstopts*8
 A block with several packets checks every verdict in order:
 
 ```
-=== TEST 2: drop is per source
---- setup: drop 203.0.113.1/32
+=== TEST 2: a block is per source
+--- setup: block 203.0.113.1/32
 --- packets
 ipv4 udp 203.0.113.1:12345 > 198.51.100.10:80
 ipv4 udp 203.0.113.2:12345 > 198.51.100.10:80
@@ -216,19 +216,19 @@ perl -It/lib -MVG::Packet=build -e \
 ## Writing control-socket blocks
 
 `cidr.t` uses `run_ctl_blocks` instead. Each block disarms (flushing
-drops), sends `input` as one control command, and compares the reply:
+blocks), sends `input` as one control command, and compares the reply:
 
 ```
 === TEST 1: v4 parse masks host bits
---- input: drop 10.1.2.3/24
+--- input: block 10.1.2.3/24
 --- expected: ok
---- drops: 10.1.2.0/24
+--- blocks: 10.1.2.0/24
 ```
 
 `expected` is the reply without its trailing newline. The optional
-`drops` section is the `drops` listing afterwards, one CIDR per line,
-with `reason=` and `age=` stripped. Leave it empty (`--- drops:`) to
-assert that nothing was installed.
+`blocks` section is the cidrs of the `blocks` listing afterwards, one per
+line. Leave it empty (`--- blocks:`) to assert that nothing was
+installed.
 
 ## Numbering and spacing
 
@@ -240,14 +240,14 @@ each case stands apart when reading a file:
 
 
 
-=== TEST 8: UDP sport 67 from dropped src is not a whitelist
+=== TEST 8: UDP sport 67 from blocked src is not a whitelist
 ```
 
 Every block is named `=== TEST N: <behavior>`, numbered from 1 in each
 file, so a failure such as
 
 ```
-#   Failed test 'TEST 7: UDP sport 68 from dropped src is not a whitelist'
+#   Failed test 'TEST 7: UDP sport 68 from blocked src is not a whitelist'
 ```
 
 leads straight to the block with `grep -n 'TEST 7:' t/v4.t`. Don't
@@ -270,7 +270,7 @@ is safe to run on every file.
    header above); `prove -r t/` picks up new files automatically.
 2. Add a `===` block where it belongs. Name it after the behavior,
    stating the expected outcome ("... is not a whitelist", "... passes
-   from dropped src"). Leave the number off, or use any number.
+   from blocked src"). Leave the number off, or use any number.
 3. Run `t/bin/reindex t/<file>.t`.
 4. For a bug fix, run the block against the unfixed build first and make
    sure it fails. A test that passed before the fix proves nothing.

@@ -10,7 +10,7 @@ Contents:
 2. [Scope](#2-scope)
 3. [Architecture](#3-architecture)
 4. [Control protocol](#4-control-protocol)
-5. [Timed drops](#5-timed-drops)
+5. [Timed blocks](#5-timed-blocks)
 6. [The drop list](#6-the-drop-list)
 7. [Logging](#7-logging)
 8. [State machine](#8-state-machine)
@@ -55,12 +55,12 @@ Out of scope:
 - **No WAF.** voidgate does not parse HTTP, match signatures or rate-limit
   requests. The gateway detects; voidgate enforces.
 - No other deciders yet (fail2ban, HAProxy, ...). Anything that can run
-  `voidgatectl drop <ip> ttl=<sec>` works, but nothing else ships (§15).
+  `voidgatectl block <ip> ttl=<sec>` works, but nothing else ships (§15).
 - No persistence and no per-caller permissions (§11).
 
 The `AGENT.md` invariants still hold:
 
-- no BPF change: a timed drop is an ordinary `drop_v4` / `drop_v6` entry;
+- no BPF change: a timed block is an ordinary `drop_v4` / `drop_v6` entry;
 - protected prefixes (`local_*`, `allow_*`) are still refused;
 - the control plane still decides what is dropped.
 
@@ -71,7 +71,7 @@ The `AGENT.md` invariants still hold:
  │ OpenResty / Kong / APISIX worker    │         │ voidgate daemon              │
  │                                     │  unix   │                              │
  │  limit_req → 429                    │  socket │  ctl_server.c                │
- │  log phase: resty.voidgate.ban()    │         │    drop <cidr> ttl=N         │
+ │  log phase: resty.voidgate.ban()    │         │    block <cidr> ttl=N        │
  │    ├─ shared dict: once per window  │         │  policy.c                    │
  │    └─ ngx.timer.at → cosocket ──────┼────────▶│    drop_add()    merge rules │
  │  access phase: ban_now() ───────────┼────────▶│    drop list     pool+lists  │
@@ -92,10 +92,10 @@ Only the control plane knows a drop is timed. XDP just looks it up.
 One new form of an existing command:
 
 ```
-drop <cidr> ttl=<seconds>
+block <cidr> ttl=<seconds>
 ```
 
-The dispatcher strips `drop `; `ctl_drop` sees `<cidr>` or
+The dispatcher strips `block `; `ctl_block` sees `<cidr>` or
 `<cidr> ttl=<seconds>`. **The first word is always the CIDR** and is judged
 first, parsed in place with `vg_parse_cidr_len` (no second copy, and a NUL
 inside the word is rejected). Only the text after the first space is
@@ -104,34 +104,35 @@ bound digit by digit, so the value cannot overflow.
 
 | Input | Reply |
 |---|---|
-| `drop 203.0.113.7 ttl=600` | `ok`. A bare address is a `/32` or `/128`, as before. |
-| `drop 203.0.113.7 ttl=0060` | `ok`, 60 s: leading zeros are still decimal |
-| a bad CIDR, whatever follows: `drop ttl=60 <ip>`, `drop  <ip>` (two spaces), an over-long word | `error: bad cidr` |
+| `block 203.0.113.7 ttl=600` | `ok`. A bare address is a `/32` or `/128`, as before. |
+| `block 203.0.113.7 ttl=0060` | `ok`, 60 s: leading zeros are still decimal |
+| a bad CIDR, whatever follows: `block ttl=60 <ip>`, `block  <ip>` (two spaces), an over-long word | `error: bad cidr` |
 | ttl outside 1 … 31536000 (one year), empty, sign, space, hex, trailing text, a number past `uint32`, or any option other than `ttl=` | `error: bad ttl` |
 | covers `local_*` or `allow_*`, the drop list is full, or the map write failed | `error: refused or map update failed` |
-| `undrop <cidr>` whose kernel delete fails | `error: map update failed` (was a silent `ok`) |
+| `unblock <cidr>` whose kernel delete fails | `error: map update failed` (was a silent `ok`) |
 
 Compatibility:
 
-- `drop <cidr>` without a ttl behaves as before.
-- The `drops` line format is unchanged (`<cidr> reason=N age=N`); timed
-  drops show `reason=4`. The remaining ttl is deliberately left out, because
-  clients and tests anchor on that exact line. Lines are now oldest first.
+- `block <cidr>` without a ttl behaves as before.
+- `blocks` lists every block, oldest first, 256 a page, as
+  `id=N cidr=C reason=R inserted=<Unix s> expires=<Unix s>`: a timed
+  block shows `reason=timed` and its `expires`, every other one
+  `expires=0`.
 - `voidgatectl` exits 1 when the reply starts with `error`, or when the
   daemon closes without replying. It used to exit 0 for everything.
 
-## 5. Timed drops
+## 5. Timed blocks
 
 ### 5.1 Reasons
 
 | Reason | Name | Installed by | Lifted by |
 |---|---|---|---|
-| 1 | manual | `drop <cidr>` | `undrop`, `disarm`, a reload that makes it cover a protected prefix |
+| 1 | manual | `block <cidr>` | `unblock`, `disarm`, a reload that makes it cover a protected prefix |
 | 2 | policy | per-remote threshold | `ban_time` after insert |
 | 3 | aggregate | `aggregate_k` hosts in one `/24` or `/64` | `ban_time` after insert |
-| **4** | **timed** | `drop <cidr> ttl=N` | **its own `expires`**, plus everything that lifts a manual drop |
+| **4** | **timed** | `block <cidr> ttl=N` | **its own `expires`**, plus everything that lifts a manual block |
 
-### 5.2 Dropping a prefix that is already listed
+### 5.2 Blocking a prefix that is already listed
 
 All drops go through `drop_add()` in `src/policy.c`:
 
@@ -141,17 +142,17 @@ All drops go through `drop_add()` in `src/policy.c`:
 | **timed** | becomes manual (permanent) | `expires = max(old, now + ttl)` | no change |
 | **policy / aggregate** | becomes manual | becomes timed, `expires = max(inserted + ban_time, now + ttl)` | no change |
 
-- **Manual wins.** An operator's permanent drop is never shortened by an
+- **Manual wins.** An operator's permanent block is never shortened by an
   automated ban.
 - **A ttl only ever extends.** Re-banning a banned address never shortens
   the ban.
-- **A timed drop on a policy drop keeps the longer of the two.** The flood
+- **A timed block on a policy block keeps the longer of the two.** The flood
   detector's decision is never cut short.
 
 ### 5.3 Expiry
 
 `expire_drops()` runs on every ACTIVE tick (`idle_poll_ms`, 1 s by
-default) and lifts a timed drop once `now >= expires`, using wall-clock
+default) and lifts a timed block once `now >= expires`, using wall-clock
 `time()` as `ban_time` does. Expiry only runs while ACTIVE, which is
 enough: any drop forces ACTIVE, and the gate cannot disarm while drops
 remain.
@@ -159,16 +160,16 @@ remain.
 ### 5.4 No aggregation
 
 `maybe_aggregate()` drops a whole `/24` or `/64` once `aggregate_k` listed
-drops fall inside it. **Timed drops are not counted.** Web clients cluster
+drops fall inside it. **Timed blocks are not counted.** Web clients cluster
 behind carrier CGNAT and corporate egress addresses: a few web bans in one
-`/24` plus one flood source must not drop the whole prefix. Manual drops
+`/24` plus one flood source must not drop the whole prefix. Manual blocks
 still count, as before.
 
 ## 6. The drop list
 
 ### 6.1 Why it changed
 
-The list was an array that grew with `realloc`, and every `drop`, `undrop`
+The list was an array that grew with `realloc`, and every `block`, `unblock`
 and expiry searched it linearly; expiry searched again for each record it
 lifted. A burst of bans made that O(n²):
 
@@ -199,7 +200,7 @@ struct vg_drop_rec {
 
 - **Pool size** is `2 × drop_map_size`: `drop_v4` and `drop_v6` each hold
   up to `drop_map_size` entries, and `reload` cannot grow them, so the list
-  can never need more. A drop past the pool is refused (`drop list full`),
+  can never need more. A drop past the pool is refused (`block list full`),
   the same bound the kernel maps already had.
 - **Records never move**, so list nodes stay valid while linked, and a
   record stays readable after it is lifted until the next allocation.
@@ -220,7 +221,7 @@ struct vg_drop_rec {
 | find | hash the prefix, walk its bucket | O(1) average |
 | add | take a record (free list, else pool), map write, `hlist_add_head`, `list_add_tail` | O(1) |
 | remove | **kernel map → hash → list**: map delete, `hlist_del`, `list_del`, onto `drop_free` | O(1) worst case |
-| walk (expiry, reload prune, aggregation, `drops`) | safe iteration of `drop_all` | O(n) |
+| walk (expiry, reload prune, aggregation, `blocks`) | safe iteration of `drop_all` | O(n) |
 | disarm | flush the maps, then reset heads, lists and `drop_used` | O(buckets) |
 
 **Remove order matters.** The kernel delete comes first: if it fails, the
@@ -243,17 +244,17 @@ call, and logging was over 90 % of the cost of a ban burst.
 
 | Event | Default | With `-v` |
 |---|---|---|
-| drops added since the last tick | one line per tick, naming up to 8: `dropped 203.0.113.7/32 (policy), 198.51.100.0/24 (aggregate); 2 listed`; past 8, counts and the first 8: `dropped 9800 prefixes (manual 0, policy 70, aggregate 3, timed 9727), first 198.18.0.1/32 (timed), …; 41 again, 9812 listed` | plus `drop <cidr> (<reason>)`, and `again` for a re-drop |
-| drops expired this tick | one line per tick, the same way: `expired 203.0.113.7/32 (policy); 1 left`, or `expired 9873 drops (policy 70, aggregate 3, timed 9800), first …; 12 left` | plus `expire <cidr> (<reason>)` |
-| `undrop` from the socket | `undrop <cidr>` | same |
-| reload lifting a protected drop | `reload: undrop <cidr> (now covers local/allow)` | same |
+| drops added since the last tick | one line per tick, naming up to 8: `blocked 203.0.113.7/32 (policy), 198.51.100.0/24 (aggregate); 2 listed`; past 8, counts and the first 8: `blocked 9800 prefixes (manual 0, policy 70, aggregate 3, timed 9727), first 198.18.0.1/32 (timed), …; 41 again, 9812 listed` | plus `block <cidr> (<reason>)`, and `again` for a re-block |
+| drops expired this tick | one line per tick, the same way: `expired 203.0.113.7/32 (policy); 1 left`, or `expired 9873 blocks (policy 70, aggregate 3, timed 9800), first …; 12 left` | plus `expire <cidr> (<reason>)` |
+| `unblock` from the socket | `unblock <cidr>` | same |
+| reload lifting a protected block | `reload: unblock <cidr> (now covers local/allow)` | same |
 | refusal, full list, map failure | one line each | same |
 
 Refusals and failures stay per prefix: they are rare, and a refusal is
 exactly what someone debugging a missing ban looks for. The added-drops
 summary is written at the start of the next tick, so drops lifted by a
 `disarm` in between are still reported. To see which addresses are banned,
-use `voidgatectl drops`.
+use `voidgatectl blocks`.
 
 ### 7.2 The gateway
 
@@ -281,15 +282,15 @@ own; its connect attempt is what makes nginx log the failure once a minute.
 
 ## 8. State machine
 
-- A timed drop arms the gate, like a manual one.
+- A timed block arms the gate, like a manual one.
 - ACTIVE → IDLE still needs an empty drop list, so **the gate stays armed
   while any web ban is live**. ACTIVE parses every packet and updates the
   host and remote maps: more than the idle path, far less than letting the
   request reach nginx. A site that bans steadily will be armed most of the
   time, which weakens "silent unless under attack". Accepted (§14).
-- `disarm`, and a daemon restart, forget every timed drop. Nothing is
+- `disarm`, and a daemon restart, forget every timed block. Nothing is
   persisted.
-- `reload` lifts a timed drop that now covers `local_*` or `allow_*`, as it
+- `reload` lifts a timed block that now covers `local_*` or `allow_*`, as it
   does every other drop.
 
 ## 9. Client: `resty.voidgate`
@@ -302,16 +303,16 @@ lua-nginx-module. It follows the OpenResty `resty.*` naming convention.
 local vg = require("resty.voidgate")
 vg.ban(ip, ttl, { dict = "voidgate_ban", window = 10, client = c })  -- 10s
 vg.ban_now(ip, ttl, { client = c })            -- true, or nil, err
-vg.drop(cidr, ttl) / vg.undrop(cidr)           -- prefixes, ttl required
-vg.status() / vg.stats() / vg.drops() / vg.arm() / vg.disarm() / vg.reload()
+vg.block(cidr, ttl) / vg.unblock(cidr)           -- prefixes, ttl required
+vg.status() / vg.stats() / vg.blocks() / vg.arm() / vg.disarm() / vg.reload()
 vg.new({ path = "/run/voidgate.sock", timeout = 1 })   -- 1s
 ```
 
 **Which call.** Request code bans one client address; `ban()` and
 `ban_now()` take that address and differ only in when they talk to the
-daemon. `drop()` / `undrop()` mirror the socket protocol for prefixes.
+daemon. `block()` / `unblock()` mirror the socket protocol for prefixes.
 
-| | `ban(ip, ttl, opt)` | `ban_now(ip, ttl, opt)` | `drop(cidr, ttl)` |
+| | `ban(ip, ttl, opt)` | `ban_now(ip, ttl, opt)` | `block(cidr, ttl)` |
 |---|---|---|---|
 | target | one address | one address | any CIDR |
 | sends | later, from a timer | now | now |
@@ -319,17 +320,17 @@ daemon. `drop()` / `undrop()` mirror the socket protocol for prefixes.
 | returns | `true` once queued; answer logged | `true`, or `nil, err` | `true`, or `nil, err` |
 | deduplication | once per window with `opt.dict` | none | none |
 
-**No permanent drop from Lua.** Every one of these needs a ttl (1 s to one
-year); `drop(cidr)` without one is `nil, "bad ttl"` and nothing is sent.
+**No permanent block from Lua.** Every one of these needs a ttl (1 s to one
+year); `block(cidr)` without one is `nil, "bad ttl"` and nothing is sent.
 Gateway code that forgets a ttl must not leave a drop nothing will lift.
-A permanent drop is an operator's decision: `voidgatectl drop <cidr>`.
+A permanent block is an operator's decision: `voidgatectl block <cidr>`.
 
 **Transport.** `ngx.socket.tcp()` connects to `unix:<path>`, sends one line
 and reads with `receive("*a")` until the daemon closes. No keepalive pool:
 the protocol is one command per connection.
 
 **Phases.** Plain Lua runs in every phase; what ngx_lua restricts per phase
-is I/O. `ban_now()` and the methods (`drop`, `status`, ...) talk to the
+is I/O. `ban_now()` and the methods (`block`, `status`, ...) talk to the
 daemon over a cosocket, which yields, so they work only where cosockets are
 allowed. Elsewhere ngx_lua *raises* `API disabled in the context of ...`,
 which would abort the caller's handler; the client catches that and
@@ -399,7 +400,7 @@ OpenResty. For another OpenResty, Kong or APISIX, set
 
 The bridge bans through `M.ban()`, which uses the ban socket,
 `/run/voidgate-ban.sock` (Seawall proposal 0012 §2): it takes only
-`drop <address> ttl=<seconds>`, one address, so a compromised gateway
+`block <address> ttl=<seconds>`, one address, so a compromised gateway
 can't block a range, disarm the gate or lift a block. The socket is
 created `0600`; voidgate's `-B group` `chown`s it to that group after
 `bind` and opens it `0660`, so gateway workers can connect. The shipped
@@ -432,7 +433,7 @@ match the host group's.
 ## 11. Security
 
 **Trust.** Group members get the whole protocol: `disarm`, `reload`, and
-`drop` of any unprotected prefix. A code-execution bug in the gateway can
+`block` of any unprotected prefix. A code-execution bug in the gateway can
 therefore turn off the gate or drop arbitrary prefixes. Accepted for now:
 
 - the gateway already terminates all traffic, so compromising it is
@@ -456,9 +457,9 @@ proxy itself. Two things are required:
 | `ban_now()` or a method in a phase without cosockets | `nil, "no cosocket in this phase, use ban()"`; the caller's handler keeps running |
 | daemon restart, or `disarm` | bans are forgotten; the next offending request after the dedup window bans again |
 | gateway reload or crash | bans already sent stay until their ttl; nothing to clean up |
-| drop list full (`2 × drop_map_size`) | `drop <cidr> refused: drop list full`; the client gets `error: refused or map update failed` |
+| drop list full (`2 × drop_map_size`) | `block <cidr> refused: block list full`; the client gets `error: refused or map update failed` |
 | kernel map write fails | the record goes back to the pool; `error: refused or map update failed` |
-| kernel map delete fails | the record stays listed and expiry retries it next tick; `undrop` answers `error: map update failed` |
+| kernel map delete fails | the record stays listed and expiry retries it next tick; `unblock` answers `error: map update failed` |
 | `lua_max_pending_timers` reached | `ngx.timer.at` fails; `ban()` returns `nil, err` |
 | daemon slow | the cosocket times out after `timeout` and ngx_lua logs it; with `ban()` only the timer waits, never a request; `ban_now()` waits up to `timeout` in its phase |
 
@@ -470,36 +471,34 @@ For anyone upgrading:
   `t/integration/lua.sh`; `resty.voidgate` replaces it. `make install-lua`
   now targets OpenResty's site lualib and `LUA_VERSION` is gone.
 - **`voidgatectl` exits 1** on an `error:` reply.
-- **`undrop`** answers `error: map update failed` when the kernel refuses
+- **`unblock`** answers `error: map update failed` when the kernel refuses
   the delete.
-- **`voidgatectl drops`** lists oldest first.
-- **Logs:** per-drop `drop` / `undrop` lines from drops and expiry become
+- **`voidgatectl blocks`** lists oldest first.
+- **Logs:** per-block `block` / `unblock` lines from drops and expiry become
   per-tick summaries; use `-v` for the old detail.
-- **`drop <cidr> <junk>`** answers `error: bad ttl`; a misplaced or empty
+- **`block <cidr> <junk>`** answers `error: bad ttl`; a misplaced or empty
   CIDR answers `error: bad cidr`.
-- **No permanent drop from Lua.** `drop(cidr)` without a ttl, in the
+- **No permanent block from Lua.** `block(cidr)` without a ttl, in the
   removed LuaSocket client and in the first version of `resty.voidgate`,
-  made one; every Lua drop now needs a ttl and `drop(cidr)` answers
-  `nil, "bad ttl"`. `voidgatectl drop <cidr>` still makes a permanent drop.
+  made one; every Lua block now needs a ttl and `block(cidr)` answers
+  `nil, "bad ttl"`. `voidgatectl block <cidr>` still makes a permanent block.
 - **Wrong phase:** a `resty.voidgate` method called where cosockets are
   disabled returns `nil, err`; it used to raise and abort the handler.
 
 ## 14. Alternatives considered
 
 - **Keeping the ttl in OpenResty** (a shared dict plus a timer that calls
-  `undrop`). Rejected: the state is lost on nginx restart, it is
-  per-instance, and a crash leaves permanent drops behind.
-- **A separate `ban` command.** Rejected: a `ttl=` option on `drop` keeps
+  `unblock`). Rejected: the state is lost on nginx restart, it is
+  per-instance, and a crash leaves permanent blocks behind.
+- **A separate `ban` command.** Rejected: a `ttl=` option on `block` keeps
   one code path, one refusal rule and one listing.
-- **The remaining ttl in the `drops` line.** Rejected for compatibility
-  (§4).
 - **Enforcing drops while IDLE** (one LPM lookup without arming). Rejected
   for now: it breaks invariant 1 (the idle path does no LPM) and needs a
   BPF change. Revisit if web bans keeping the gate armed costs measurably.
 - **A generic Lua client plus an OpenResty wrapper.** Rejected: two modules
   and a pluggable transport add surface for hosts we do not target.
-- **Other client APIs.** Module-level `drop()` next to `ban()` read as two
-  names for one thing, and `drop(ip)` without a ttl made a permanent drop.
+- **Other client APIs.** Module-level `block()` next to `ban()` read as two
+  names for one thing, and `block(ip)` without a ttl made a permanent block.
   Hiding the protocol methods behind `vg.new()` was considered; a single
   `ban()` that checks `ngx.get_phase()` was rejected because it would
   return different things in different phases. Chosen: `ban()` and
@@ -508,31 +507,31 @@ For anyone upgrading:
 - **fail2ban.** Deferred. Its most common jail (sshd) would do nothing:
   invariant 4 passes TCP to local `allow_ports` before the drop lookup. It
   bans at low rates that `nftables` already handles cheaply, and correct
-  multi-jail unban needs per-drop ownership tags (§15).
+  multi-jail unban needs per-block ownership tags (§15).
 - **A min-heap or index-chained hash for the drop list.** See §6.3: the
   heap saves under a millisecond per tick; the index-chained array needed
   relinking on every swap-remove, which the pool and lists avoid.
 
 ## 15. Future work
 
-- A restricted second socket that accepts only `drop <host> ttl=` and
+- A restricted second socket that accepts only `block <host> ttl=` and
   `status`, so the gateway never gets `disarm` or `reload`.
 - Tagging each drop with who installed it, so one decider's unban cannot
   lift another's ban (needed before fail2ban support).
-- Persisting timed drops across daemon restarts.
+- Persisting timed blocks across daemon restarts.
 
 ## 16. Tests
 
 | Test | Covers |
 |---|---|
-| `t/unit/policy.c` `test_ttl` | arm on a timed drop, extend-only merge, manual wins both ways, policy → timed keeps `ban_time`, expiry (v4 and v6), no aggregation, `disarm` flush |
-| `t/unit/policy.c` `test_drop_index` | 20,000 random adds, re-drops, undrops and expiries; after each, both lists and every `prev` / `pprev` link agree, and lookups match a shadow set |
+| `t/unit/policy.c` `test_ttl` | arm on a timed block, extend-only merge, manual wins both ways, policy → timed keeps `ban_time`, expiry (v4 and v6), no aggregation, `disarm` flush |
+| `t/unit/policy.c` `test_drop_index` | 20,000 random adds, re-blocks, unblocks and expiries; after each, both lists and every `prev` / `pprev` link agree, and lookups match a shadow set |
 | `t/unit/policy.c` `test_pool` | full pool refused, lifted record reused, failed map write returns its record, oldest-first order, `disarm` empties the pool |
 | `t/unit/policy.c` `test_del_fail` | a failed kernel delete keeps the record and does not spin the expiry loop |
 | `t/unit/policy.c` `test_expire_log`, `test_drop_log` | one summary line per tick, per-prefix lines only with `-v`, refusals still per line |
 | `t/unit/cidr.c` | `vg_parse_cidr_len`: a word of a longer line, NUL inside the length, over-long input |
-| `t/drop-ttl.t` | protocol parsing: v4 and v6, refusal, ttl bounds and digits-only, CIDR-first errors |
-| `t/drop-ttl-xdp.t` | a timed drop really drops at XDP; SSH still passes |
+| `t/block-ttl.t` | protocol parsing: v4 and v6, refusal, ttl bounds and digits-only, CIDR-first errors |
+| `t/block-ttl-xdp.t` | a timed block really drops at XDP; SSH still passes |
 | `t/integration/daemon.sh` | `-g` chown, kept on reload, unknown group stops the start; `voidgatectl` exits 1 on error |
 | `t/integration/resty.sh` + `resty.lua` | real nginx with workers as `nobody:nogroup`: every method against a real daemon, ttl required and validated, reload; `ban_now()` answers and local rejects; `ban()` from the log phase, 50 requests send exactly one ban; `ban_now()` from the log phase returns an error instead of aborting the handler |
 

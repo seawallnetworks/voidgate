@@ -5,7 +5,7 @@
 #   === name
 #   --- idle                  (optional: leave the gate disarmed)
 #   --- setup                 (optional: ctl commands, each must reply ok)
-#   drop 203.0.113.1/32
+#   block 203.0.113.1/32
 #   --- packets               (one VG::Packet spec per line)
 #   ipv4 udp 203.0.113.1:68 > 198.51.100.10:80
 #   --- verdict               (one XDP_PASS / XDP_DROP per packet line)
@@ -13,9 +13,9 @@
 #   --- counters: rx_pkts=1 dropped=0     (optional: summed stats deltas)
 #
 # ctl blocks:
-#   --- input: drop 10.1.2.3/24
+#   --- input: block 10.1.2.3/24
 #   --- expected: ok
-#   --- drops: 10.1.2.0/24    (optional: `drops` listing without ages)
+#   --- blocks: 10.1.2.0/24   (optional: the listed blocks' cidrs)
 
 package VG::Test;
 
@@ -119,19 +119,18 @@ sub run_ctl_blocks() {
     my @blocks = blocks;
     my $tests = 0;
 
-    $tests += defined $_->drops ? 2 : 1 for @blocks;
+    $tests += defined $_->blocks ? 2 : 1 for @blocks;
     plan tests => $tests;
 
     for my $block (@blocks) {
         ctl('disarm');
         is(ctl($block->input), $block->expected . "\n", $block->name);
 
-        if (defined $block->drops) {
-            my @got = map { s/ reason=\d+ age=\d+$//r }
-                      grep { $_ ne '(none)' } $lines->(ctl('drops'));
+        if (defined $block->blocks) {
+            my @got = ctl('blocks') =~ /^id=\d+ cidr=(\S+) /mg;
 
-            is_deeply(\@got, [$lines->($block->drops)],
-                      $block->name . ': drops');
+            is_deeply(\@got, [$lines->($block->blocks)],
+                      $block->name . ': blocks');
         }
     }
 }

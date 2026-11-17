@@ -19,10 +19,10 @@
 #include <unistd.h>
 
 
-#define VG_MAX_DROP_TTL  31536000     /* one year */
+#define VG_MAX_BLOCK_TTL  31536000     /* one year */
 
-/* A reply's room: the commands of old keep theirs, which the Lua client's
- * "drops" was written for; a page of changes or blocks gets more.
+/* A reply's room: VG_REPLY_SIZE for most commands; a page of changes or
+ * blocks gets more.
  */
 #define VG_REPLY_SIZE       8192
 #define VG_PAGE_REPLY_SIZE  65536
@@ -47,15 +47,13 @@ static void ctl_status(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static void ctl_stats(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
-static void ctl_drops(struct vg_ctrl *ctrl, const char *args,
-    char *reply, size_t reply_size);
 static void ctl_arm(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static void ctl_disarm(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
-static void ctl_drop(struct vg_ctrl *ctrl, const char *args,
+static void ctl_block(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
-static void ctl_undrop(struct vg_ctrl *ctrl, const char *args,
+static void ctl_unblock(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int parse_ttl(const char *s, uint32_t *out);
 static int vg_ctrl_reload(struct vg_ctrl *c);
@@ -73,19 +71,18 @@ static int ban_allowed(const vg_ctl_command_t *cmd, const char *args);
 static const vg_ctl_command_t  vg_ctl_commands[] = {
     { "status",   0, 1, 0, ctl_status },
     { "stats",    0, 1, 0, ctl_stats },
-    { "drops",    0, 1, 0, ctl_drops },
     { "changes",  1, 1, 1, ctl_changes },
     { "blocks",   1, 1, 1, ctl_blocks },
     { "arm",      0, 0, 0, ctl_arm },
     { "disarm",   0, 0, 0, ctl_disarm },
-    { "drop ",    1, 0, 0, ctl_drop },
-    { "undrop ",  1, 0, 0, ctl_undrop },
+    { "block ",   1, 0, 0, ctl_block },
+    { "unblock ", 1, 0, 0, ctl_unblock },
     { "reload",   0, 0, 0, ctl_reload }
 };
 
 
 /*
- * On the ban socket, only "drop <address> ttl=<seconds>": one address,
+ * On the ban socket, only "block <address> ttl=<seconds>": one address,
  * a /32 or /128 (or bare), and a valid ttl, nothing else. A ban client
  * bans the clients it saw; a network is an operator's decision, so a
  * compromised one can't block a whole range.
@@ -97,7 +94,7 @@ ban_allowed(const vg_ctl_command_t *cmd, const char *args)
     const char      *sp;
     struct vg_cidr   p;
 
-    if (cmd->handler != ctl_drop) {
+    if (cmd->handler != ctl_block) {
         return 0;
     }
 
@@ -114,7 +111,7 @@ ban_allowed(const vg_ctl_command_t *cmd, const char *args)
 
 
 /*
- * Without sw_flowd's table, the first line of status and stats: a broken
+ * Without sw_flowd's table, the first line of status: a broken
  * install (Seawall proposal 0015 §6), shown until voidgate restarts with
  * the table. No "=" in it, so a client reading key=value pairs, as
  * lua/resty/voidgate.lua does, skips it. Returns its length.
@@ -150,21 +147,20 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
 
     snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
-             "prefixes=%d iface=%s hook=%s degraded=%d flows=%s\n",
+             "blocked=%d degraded=%d iface=%s hook=%s flows=%s\n",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
-             ctrl->drop_count,
+             ctrl->drop_count, ctrl->maps->degraded,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
-             ctrl->maps->degraded,
              ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
 }
 
 
+/* The data path's counters, one line; the gate's state is status's. */
 static void
 ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
-    int                n;
     struct vg_metrics  m;
 
     if (vg_metrics_read(ctrl->maps, &m) < 0) {
@@ -172,12 +168,9 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
         return;
     }
 
-    n = ctl_critical(ctrl, reply, reply_size);
-
-    snprintf(reply + n, reply_size - n,
+    snprintf(reply, reply_size,
              "rx_pkts=%llu rx_bytes=%llu passed=%llu dropped=%llu "
-             "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu\n"
-             "rx_pps=%.0f rx_bps=%.0f state=%s prefixes=%d flows=%s\n",
+             "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu\n",
              (unsigned long long) m.rx_pkts,
              (unsigned long long) m.rx_bytes,
              (unsigned long long) m.passed,
@@ -185,48 +178,7 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
              (unsigned long long) m.non_ip,
              (unsigned long long) m.map_full,
              (unsigned long long) m.parse_err,
-             (unsigned long long) m.reply_passed,
-             ctrl->rx_pps,
-             ctrl->rx_bps,
-             ctrl->state == VG_ACTIVE ? "active" : "idle",
-             ctrl->drop_count,
-             ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
-}
-
-
-static void
-ctl_drops(struct vg_ctrl *ctrl, const char *args, char *reply,
-    size_t reply_size)
-{
-    size_t                     used = 0;
-    struct vg_list            *l;
-    const struct vg_drop_rec  *r;
-
-    if (ctrl->drop_count == 0) {
-        snprintf(reply, reply_size, "(none)\n");
-        return;
-    }
-
-    reply[0] = 0;
-
-    /* Oldest first. */
-    for (l = ctrl->drop_all.next;
-         l != &ctrl->drop_all && used + 80 < reply_size;
-         l = l->next)
-    {
-        int   n;
-        char  p[80];
-
-        r = vg_list_entry(l, struct vg_drop_rec, all);
-        vg_cidr_to_str(&r->cidr, p, sizeof(p));
-        n = snprintf(reply + used, reply_size - used,
-                     "%s reason=%u age=%ld\n", p, r->reason,
-                     (long) (time(NULL) - r->inserted));
-
-        if (n > 0) {
-            used += (size_t) n;
-        }
-    }
+             (unsigned long long) m.reply_passed);
 }
 
 
@@ -256,14 +208,14 @@ ctl_disarm(struct vg_ctrl *ctrl, const char *args, char *reply,
 }
 
 
-/* args is the line after "drop " (the dispatcher strips it):
- *   "<cidr>"                manual drop, stays until undrop or disarm
- *   "<cidr> ttl=<seconds>"  timed drop (reason 4), lifts itself
+/* args is the line after "block " (the dispatcher strips it):
+ *   "<cidr>"                manual block, stays until unblock or disarm
+ *   "<cidr> ttl=<seconds>"  timed block (reason 4), lifts itself
  * The first word is always the cidr; only text after the first space in
  * args is parsed as options, so a cidr is never read as a ttl.
  */
 static void
-ctl_drop(struct vg_ctrl *ctrl, const char *args, char *reply,
+ctl_block(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
     int              rc;
@@ -298,7 +250,7 @@ ctl_drop(struct vg_ctrl *ctrl, const char *args, char *reply,
 
 
 static void
-ctl_undrop(struct vg_ctrl *ctrl, const char *args, char *reply,
+ctl_unblock(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
     struct vg_cidr  p;
@@ -316,7 +268,7 @@ ctl_undrop(struct vg_ctrl *ctrl, const char *args, char *reply,
 
 
 /* "ttl=<seconds>": only decimal digits after "ttl=" (no sign, space or
- * trailing text), 1 .. VG_MAX_DROP_TTL. The bound is checked per digit,
+ * trailing text), 1 .. VG_MAX_BLOCK_TTL. The bound is checked per digit,
  * so the value cannot overflow.
  */
 static int
@@ -329,7 +281,7 @@ parse_ttl(const char *s, uint32_t *out)
     }
 
     for (v = 0, s += 4; *s != '\0'; s++) {
-        if (*s < '0' || *s > '9' || v > VG_MAX_DROP_TTL) {
+        if (*s < '0' || *s > '9' || v > VG_MAX_BLOCK_TTL) {
             return -1;
         }
 
@@ -337,7 +289,7 @@ parse_ttl(const char *s, uint32_t *out)
     }
 
     /* Also rejects an empty "ttl=". */
-    if (v < 1 || v > VG_MAX_DROP_TTL) {
+    if (v < 1 || v > VG_MAX_BLOCK_TTL) {
         return -1;
     }
 
@@ -785,7 +737,7 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int mode)
         if (mode == VG_CTL_BAN && !ban_allowed(cmd, req + len)) {
             snprintf(reply, sizeof(reply),
                      "error: denied: the ban socket takes only "
-                     "drop <address> ttl=<seconds>\n");
+                     "block <address> ttl=<seconds>\n");
             break;
         }
 

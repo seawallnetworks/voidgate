@@ -283,12 +283,12 @@ sudo ./voidgatectl status</code></pre>
                 <li class="cut">
                     <span class="layer-idx">03 · Cut</span>
                     <h3>Drop the hosts</h3>
-                    <p>A remote over <code>threshold_pps</code> / <code>threshold_mbps</code> goes in as <code>/32</code> or <code>/128</code>. <code>voidgatectl drop</code> adds to this layer and never expires.</p>
+                    <p>A remote over <code>threshold_pps</code> / <code>threshold_mbps</code> goes in as <code>/32</code> or <code>/128</code>. <code>voidgatectl block</code> adds to this layer and never expires.</p>
                 </li>
                 <li class="widen">
                     <span class="layer-idx">04 · Widen</span>
                     <h3>Drop the cluster</h3>
-                    <p>Once <code>aggregate_k</code> dropped hosts share a <code>/24</code> or <code>/64</code>, install the whole prefix. Policy and aggregate drops expire after <code>ban_time</code>.</p>
+                    <p>Once <code>aggregate_k</code> dropped hosts share a <code>/24</code> or <code>/64</code>, install the whole prefix. Policy and aggregate blocks expire after <code>ban_time</code>.</p>
                 </li>
             </ol>
         </section>
@@ -312,7 +312,7 @@ sudo ./voidgatectl status</code></pre>
                     <div class="transition to-active">
                         <span class="t-label">arm</span>
                         <svg viewBox="0 0 160 12" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="6" x2="150" y2="6"/><path d="M148 1 L158 6 L148 11 Z"/></svg>
-                        <span class="t-cond"><code>wake_pps</code> / <code>wake_mbps</code> exceeded, or <code>ctl arm</code> / <code>drop</code></span>
+                        <span class="t-cond"><code>wake_pps</code> / <code>wake_mbps</code> exceeded, or <code>ctl arm</code> / <code>block</code></span>
                     </div>
                     <div class="transition to-idle">
                         <span class="t-label">disarm</span>
@@ -342,13 +342,15 @@ sudo ./voidgatectl status</code></pre>
                 <div class="term">
                     <div class="term-bar"><i></i><i></i><i></i> /run/voidgate.sock</div>
                     <pre><span class="cmd">$ sudo voidgatectl status</span>
-<span class="out">state=idle armed=0 rx_pps=412 rx_bps=2800000 prefixes=0 iface=eth0</span>
+<span class="out">state  armed  blocked  degraded  iface        hook     flows
+ idle      0        0         0   eth0  xdp-native  sw_flowd</span>
 
-<span class="cmd">$ sudo voidgatectl drop 203.0.113.0/24</span>
+<span class="cmd">$ sudo voidgatectl block 203.0.113.0/24</span>
 <span class="out">ok</span>
 
 <span class="cmd">$ sudo voidgatectl status</span>
-<span class="out">state=active armed=1 rx_pps=184200 rx_bps=980000000 prefixes=1 iface=eth0</span>
+<span class="out"> state  armed  blocked  degraded  iface        hook     flows
+active      1        1         0   eth0  xdp-native  sw_flowd</span>
 
 <span class="cmd">$ sudo voidgatectl disarm</span>
 <span class="out">ok</span></pre>
@@ -356,13 +358,13 @@ sudo ./voidgatectl status</code></pre>
                 <div>
                     <p class="section-lede">One line in, text out, over a Unix socket. There's also an OpenResty client and a localhost Prometheus endpoint.</p>
                     <dl class="cmd-grid">
-                        <div><dt>status</dt><dd>state, rates, drop count</dd></div>
-                        <div><dt>stats</dt><dd>raw XDP counters</dd></div>
-                        <div><dt>drops</dt><dd>prefixes, reason, age</dd></div>
+                        <div><dt>status</dt><dd>state, rates, blocked count</dd></div>
+                        <div><dt>stats</dt><dd>XDP counters and rates</dd></div>
+                        <div><dt>blocks</dt><dd>what is blocked: reason, since, expires</dd></div>
                         <div><dt>arm / disarm</dt><dd>force a state</dd></div>
-                        <div><dt>drop &lt;cidr&gt;</dt><dd>manual, never expires</dd></div>
-                        <div><dt>drop &lt;cidr&gt; ttl=&lt;s&gt;</dt><dd>timed, for OpenResty bans</dd></div>
-                        <div><dt>undrop &lt;cidr&gt;</dt><dd>lift one prefix</dd></div>
+                        <div><dt>block &lt;cidr&gt;</dt><dd>manual, never expires</dd></div>
+                        <div><dt>block &lt;cidr&gt; ttl=&lt;s&gt;</dt><dd>timed, for OpenResty bans</dd></div>
+                        <div><dt>unblock &lt;cidr&gt;</dt><dd>lift one block</dd></div>
                         <div><dt>reload</dt><dd>re-read allow/local/ports</dd></div>
                         <div><dt>:9105/metrics</dt><dd>Prometheus, 127.0.0.1</dd></div>
                     </dl>
@@ -409,8 +411,8 @@ sudo ./voidgatectl status</code></pre>
                         <p>No. The built-in allow list is <code>169.254.169.254/32</code>, <code>127.0.0.0/8</code>, <code>::1/128</code>, <code>fe80::/10</code>, <code>ff02::/16</code>. DHCP and DHCPv6 to this VM (exact port pairs) and ICMPv6 NDP types 133–137 with hop limit 255 also pass before the drop tree.</p>
                     </details>
                     <details>
-                        <summary>It dropped a host it shouldn't have. Now what?</summary>
-                        <p><code>voidgatectl undrop &lt;cidr&gt;</code> lifts one prefix, and <code>voidgatectl disarm</code> flushes them all. Policy and aggregate drops expire on their own after <code>ban_time</code>. For a permanent exemption, add the prefix to <code>allow_networks</code> and run <code>voidgatectl reload</code>. Reload also lifts any drop that now covers an allowed prefix.</p>
+                        <summary>It blocked a host it shouldn't have. Now what?</summary>
+                        <p><code>voidgatectl unblock &lt;cidr&gt;</code> lifts one block, and <code>voidgatectl disarm</code> lifts them all. Policy and aggregate blocks expire on their own after <code>ban_time</code>. For a permanent exemption, add the prefix to <code>allow_networks</code> and run <code>voidgatectl reload</code>. Reload also lifts any block that now covers an allowed prefix.</p>
                     </details>
                     <details>
                         <summary>Does it need a special NIC driver?</summary>

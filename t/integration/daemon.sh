@@ -32,7 +32,7 @@ printf 'log_file = %s\n' "$work/log/voidgate.log" >> base.conf
 
 status() {
     # the last line: without sw_flowd's table a CRITICAL line comes first
-    [[ $(timeout 2 "$root/voidgatectl" status | tail -1) == state=idle* ]]
+    [[ $(timeout 2 "$root/voidgatectl" -r status | tail -1) == state=idle* ]]
 }
 
 start_daemon() {
@@ -99,35 +99,36 @@ printf 'log_file = changed.log\n' >> run.conf
 grep -q 'reloaded run.conf' config.log
 stop_daemon
 
-# reload lifts drops that now cover a local or allow-listed prefix; others
+# reload lifts blocks that now cover a local or allow-listed prefix; others
 # stay.
 cp base.conf reload.conf
 start_daemon -c reload.conf
-[[ $("$root/voidgatectl" drop 203.0.113.0/24) == ok ]]
-[[ $("$root/voidgatectl" drop 192.0.2.0/24) == ok ]]
-[[ $("$root/voidgatectl" drop 198.18.0.0/24) == ok ]]
+[[ $("$root/voidgatectl" block 203.0.113.0/24) == ok ]]
+[[ $("$root/voidgatectl" block 192.0.2.0/24) == ok ]]
+[[ $("$root/voidgatectl" block 198.18.0.0/24) == ok ]]
 printf 'local_networks = 198.51.100.10/32, 203.0.113.5/32\n' >> reload.conf
 printf 'allow_networks = 192.0.2.99/32\n' >> reload.conf
 [[ $("$root/voidgatectl" reload) == ok ]]
-drops=$("$root/voidgatectl" drops)
-[[ $drops =~ ^198\.18\.0\.0/24\ reason=1\ age=[0-9]+$ ]]
-grep -q 'reload: undrop 203.0.113.0/24' "$work/log/voidgate.log"
-grep -q 'reload: undrop 192.0.2.0/24' "$work/log/voidgate.log"
+mapfile -t lines < <("$root/voidgatectl" -r blocks)
+[[ ${lines[0]} =~ \ n=1\ next=end$ ]]
+[[ ${lines[1]} =~ ^id=[0-9]+\ cidr=198\.18\.0\.0/24\ reason=manual\  ]]
+grep -q 'reload: unblock 203.0.113.0/24' "$work/log/voidgate.log"
+grep -q 'reload: unblock 192.0.2.0/24' "$work/log/voidgate.log"
 stop_daemon
 
 # -g hands the control socket to that group; reload keeps it.
 # An unknown group stops the start.
 start_daemon -c base.conf -g nogroup
 [[ $(stat -c '%a %G' /run/voidgate.sock) == '660 nogroup' ]]
-[[ $("$root/voidgatectl" drop 198.18.0.1/32 ttl=60) == ok ]]
-[[ $("$root/voidgatectl" drops) =~ ^198\.18\.0\.1/32\ reason=4\ age=[0-9]+$ ]]
+[[ $("$root/voidgatectl" block 198.18.0.1/32 ttl=60) == ok ]]
+[[ $("$root/voidgatectl" -r blocks | tail -1) =~ ^id=[0-9]+\ cidr=198\.18\.0\.1/32\ reason=timed\  ]]
 [[ $("$root/voidgatectl" reload) == ok ]]
 [[ $(stat -c %G /run/voidgate.sock) == nogroup ]]
 # An error reply is a failed command (exit status 1).
 result=0
-"$root/voidgatectl" drop 127.0.0.1/32 ttl=60 > refused.out || result=$?
+"$root/voidgatectl" block 127.0.0.1/32 ttl=60 > refused.out || result=$?
 [[ $result == 1 && $(< refused.out) == 'error: refused or map update failed' ]]
-"$root/voidgatectl" undrop 198.18.0.1/32 > /dev/null
+"$root/voidgatectl" unblock 198.18.0.1/32 > /dev/null
 stop_daemon
 # Before the fork: the caller sees why, and nothing is left behind.
 expect_failure "$root/voidgate" -d -c base.conf -g no-such-voidgate-group
@@ -139,18 +140,20 @@ start_daemon -c base.conf
 stop_daemon
 
 # -R: the read-only socket (Seawall proposal 0012 §2), for its group. It
-# answers status, stats, drops, changes and blocks, and refuses the rest.
+# answers status, stats, changes and blocks, and refuses the rest.
 # Each change says whose it is: a socket caller's uid, or voidgate's own.
-ro() { "$root/voidgatectl" -s /run/voidgate-monitor.sock "$@"; }
+# -r: the daemon's answers, not voidgatectl's tables.
+ro() { "$root/voidgatectl" -r -s /run/voidgate-monitor.sock "$@"; }
 as_nobody() { setpriv --reuid=nobody --regid=nogroup --clear-groups "$@"; }
 cp base.conf ro.conf
 printf 'drop_map_size = 512\n' >> ro.conf
 start_daemon -c ro.conf -g nogroup -R nogroup
 [[ $(stat -c '%a %U %G' /run/voidgate-monitor.sock) == '660 root nogroup' ]]
 [[ $(ro status | tail -1) == state=idle* ]]
-[[ $(ro stats | tail -1) == rx_pps=* ]]
-[[ $(ro drops) == '(none)' ]]
-for command in arm disarm reload 'drop 198.18.0.9/32' 'undrop 198.18.0.9/32'; do
+[[ $(ro stats) == rx_pkts=* ]]
+[[ $(ro blocks) =~ \ n=0\ next=end$ ]]
+[[ $("$root/voidgatectl" -s /run/voidgate-monitor.sock blocks) == '(none)' ]]
+for command in arm disarm reload 'block 198.18.0.9/32' 'unblock 198.18.0.9/32'; do
     result=0
     ro $command > ro.out || result=$?
     [[ $result == 1 && $(< ro.out) == 'error: read-only socket' ]]
@@ -159,17 +162,23 @@ done
 result=0
 ro changesx > ro.out || result=$?
 [[ $result == 1 && $(< ro.out) == 'error: unknown command' ]]
+# the old names are gone
+for command in drops 'drop 198.18.0.9/32' 'undrop 198.18.0.9/32'; do
+    result=0
+    "$root/voidgatectl" $command > ro.out || result=$?
+    [[ $result == 1 && $(< ro.out) == 'error: unknown command' ]]
+done
 
 cursor=$(ro changes)
 [[ $cursor =~ ^epoch=([0-9a-f]{16})\ seq=0\ oldest=1\ gap=0\ n=0\ more=0$ ]]
 epoch=${BASH_REMATCH[1]}
-# a drop by uid 0 arms the gate: both its own; one by nobody, its uid
-[[ $("$root/voidgatectl" drop 198.18.0.1/32) == ok ]]
-[[ $(as_nobody "$root/voidgatectl" drop 198.18.0.2/32 ttl=60) == ok ]]
+# a block by uid 0 arms the gate: both its own; one by nobody, its uid
+[[ $("$root/voidgatectl" block 198.18.0.1/32) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" block 198.18.0.2/32 ttl=60) == ok ]]
 ro changes "$epoch" 0 > changes.out
 mapfile -t lines < changes.out
 [[ ${lines[0]} == "epoch=$epoch seq=3 oldest=1 gap=0 n=3 more=0" ]]
-[[ ${lines[1]} =~ ^seq=1\ time=[0-9]{13}\ kind=arm\ source=socket\ uid=0\ cause=manual-drop$ ]]
+[[ ${lines[1]} =~ ^seq=1\ time=[0-9]{13}\ kind=arm\ source=socket\ uid=0\ cause=manual-block$ ]]
 [[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=socket\ uid=0\ id=1\ cidr=198\.18\.0\.1/32\ reason=manual\ expires=0$ ]]
 [[ ${lines[3]} =~ ^seq=3\ time=[0-9]+\ kind=block\ source=socket\ uid=65534\ id=2\ cidr=198\.18\.0\.2/32\ reason=timed\ expires=[0-9]{10}$ ]]
 # nothing new; another epoch, or a cursor not reached yet, is a gap
@@ -190,7 +199,7 @@ mapfile -t lines < blocks.out
 
 # 300 blocks: two pages, then the end
 for i in $(seq 0 1 297); do
-    printf 'drop 198.19.%d.%d/32\n' $((i / 250)) $((i % 250))
+    printf 'block 198.19.%d.%d/32\n' $((i / 250)) $((i % 250))
 done | while read -r line; do
     "$root/voidgatectl" $line > /dev/null
 done
@@ -198,38 +207,43 @@ first=$(ro blocks | head -1)
 [[ $first =~ ^epoch=$epoch\ seq=[0-9]+\ n=256\ next=([0-9]+)$ ]]
 next=${BASH_REMATCH[1]}
 [[ $(ro blocks after "$next" | head -1) =~ ^epoch=$epoch\ seq=[0-9]+\ n=44\ next=end$ ]]
+# voidgatectl's table reads both pages: a header and the 300
+"$root/voidgatectl" -s /run/voidgate-monitor.sock blocks > table.out
+[[ $(wc -l < table.out) == 301 ]]
+[[ $(head -1 table.out) =~ ^\ *id\ +cidr\ +reason\ +since\ +expires$ ]]
+[[ $(sed -n 2p table.out) =~ ^\ *1\ +198\.18\.0\.1/32\ +manual\ +[-0-9]{10}\ [:0-9]{8}\ +never$ ]]
 
-# undrop and disarm, by the caller; then a reload
-[[ $("$root/voidgatectl" undrop 198.18.0.1/32) == ok ]]
+# unblock and disarm, by the caller; then a reload
+[[ $("$root/voidgatectl" unblock 198.18.0.1/32) == ok ]]
 [[ $(as_nobody "$root/voidgatectl" disarm) == ok ]]
 [[ $("$root/voidgatectl" reload) == ok ]]
 ro changes "$epoch" 301 > changes.out
 mapfile -t lines < changes.out
 [[ ${lines[0]} == "epoch=$epoch seq=304 oldest=1 gap=0 n=3 more=0" ]]
-[[ ${lines[1]} =~ kind=unblock\ source=socket\ uid=0\ cause=undrop\ id=1\ cidr=198\.18\.0\.1/32 ]]
+[[ ${lines[1]} =~ kind=unblock\ source=socket\ uid=0\ cause=unblock\ id=1\ cidr=198\.18\.0\.1/32 ]]
 [[ ${lines[2]} =~ kind=disarm\ source=socket\ uid=65534\ cause=command$ ]]
 [[ ${lines[3]} =~ kind=reload\ source=socket\ uid=0\ cause=reload$ ]]
 grep -q 'disarmed (command, socket uid 65534)' "$work/log/voidgate.log"
 [[ $(ro blocks) == "epoch=$epoch seq=304 n=0 next=end" ]]
 stop_daemon
 
-# -B: the ban socket, for its group: drop <address> ttl=N only, one
-# address (/32, /128 or bare), never a network. A drop on an idle gate
+# -B: the ban socket, for its group: block <address> ttl=N only, one
+# address (/32, /128 or bare), never a network. A block on an idle gate
 # arms it, both changes the ban client's, source ban.
 start_daemon -c ro.conf -g root -R nogroup -B nogroup
 [[ $(stat -c '%a %U %G' /run/voidgate-ban.sock) == '660 root nogroup' ]]
-for command in status stats drops changes blocks arm disarm reload \
-    'drop 198.18.0.9/32' 'drop 198.18.0.9/32 ttl=0' \
-    'drop 198.18.0.9/32 ttl=60 x' 'undrop 198.18.0.9/32' \
-    'drop 198.18.0.0/24 ttl=60' 'drop 0.0.0.0/1 ttl=60' \
-    'drop 2001:db8::/64 ttl=60' 'drop bad ttl=60'; do
+for command in status stats changes blocks arm disarm reload \
+    'block 198.18.0.9/32' 'block 198.18.0.9/32 ttl=0' \
+    'block 198.18.0.9/32 ttl=60 x' 'unblock 198.18.0.9/32' \
+    'block 198.18.0.0/24 ttl=60' 'block 0.0.0.0/1 ttl=60' \
+    'block 2001:db8::/64 ttl=60' 'block bad ttl=60'; do
     result=0
-    as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock $command \
+    as_nobody "$root/voidgatectl" -r -s /run/voidgate-ban.sock $command \
         > ban.out || result=$?
-    [[ $result == 1 && $(< ban.out) == 'error: denied: the ban socket takes only drop <address> ttl=<seconds>' ]]
+    [[ $result == 1 && $(< ban.out) == 'error: denied: the ban socket takes only block <address> ttl=<seconds>' ]]
 done
 [[ $(ro status | tail -1) == state=idle* ]]
-[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 198.18.0.3/32 ttl=60) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock block 198.18.0.3/32 ttl=60) == ok ]]
 ro changes > ban.out
 [[ $(< ban.out) =~ ^epoch=([0-9a-f]{16})\ seq=2 ]]
 ro changes "${BASH_REMATCH[1]}" 0 > changes.out
@@ -238,8 +252,8 @@ mapfile -t lines < changes.out
 [[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=ban\ uid=65534\ id=1\ cidr=198\.18\.0\.3/32\ reason=timed ]]
 grep -q 'armed (ban, ban uid 65534)' "$work/log/voidgate.log"
 # a bare address, and IPv6's /128
-[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 198.18.0.4 ttl=60) == ok ]]
-[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock drop 2001:db8::4/128 ttl=60) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock block 198.18.0.4 ttl=60) == ok ]]
+[[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock block 2001:db8::4/128 ttl=60) == ok ]]
 [[ $(ro blocks | head -1) =~ \ n=3\ next=end$ ]]
 stop_daemon
 [[ ! -e /run/voidgate-ban.sock ]]
@@ -255,7 +269,7 @@ start_daemon -c auto.conf -i dum0
 grep -q 'libbpf: .*Kernel error message' "$work/log/voidgate.log"
 grep -q 'native XDP attach failed (.*), falling back to skb' \
     "$work/log/voidgate.log"
-[[ $("$root/voidgatectl" status | tail -1) == *hook=xdp-skb* ]]
+[[ $("$root/voidgatectl" -r status | tail -1) == *hook=xdp-skb* ]]
 stop_daemon
 ip link del dum0
 

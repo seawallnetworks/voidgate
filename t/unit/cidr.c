@@ -202,7 +202,7 @@ main(void)
     memcpy(long_cidr, "10.0.0.0/8", 10);
     expect_cidr(long_cidr, NULL);
 
-    /* One word of a longer line, parsed in place (ctl "drop <cidr> ..."). */
+    /* One word of a longer line, parsed in place (ctl "block <cidr> ..."). */
     expect_cidr_len("10.1.2.3/24 ttl=60", 11, "10.1.2.0/24");
     expect_cidr_len("2001:db8::1/64 ttl=60", 14, "2001:db8::/64");
     expect_cidr_len("10.0.0.1/24", 8, "10.0.0.1/32");

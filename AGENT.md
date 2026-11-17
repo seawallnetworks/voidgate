@@ -84,15 +84,15 @@ Userspace owns state. XDP only reads `cfg.armed`.
 ```
 IDLE  -- wake_pps / wake_mbps or `voidgatectl arm` -->  ACTIVE
 ACTIVE -- quiet for clear_seconds AND drop tree empty --> IDLE
-`voidgatectl drop <cidr>` forces ACTIVE
-`voidgatectl disarm` flushes drops and returns IDLE
+`voidgatectl block <cidr>` forces ACTIVE
+`voidgatectl disarm` flushes blocks and returns IDLE
 ```
 
 - `wake_*`: NIC is on fire, turn the gate on.
 - `threshold_*`: this remote is part of the attack, install a drop.
 - Policy (ACTIVE, 1s): top remotes over threshold → `/32` or `/128`;
   dense clusters → `/24` or `/64`. Manual drops are not auto-expired.
-- Timed drops (`drop <cidr> ttl=<sec>`, reason 4) are L7 bans pushed by
+- Timed blocks (`block <cidr> ttl=<sec>`, reason 4) are L7 bans pushed by
   OpenResty. They lift at their own expiry, a re-ban only
   extends them, manual wins over them, and they never count toward
   `aggregate_k` (one NAT /24 of web users must not become a prefix drop).
@@ -184,15 +184,19 @@ runs the verdicts at TC (`make test` runs all three hooks), and
   (packet specs: `t/lib/VG/Packet.pm`); if you change wake/arm, run
   `t/integration/netns.sh`.
 - Unix ctl protocol is one line in, text out: `status`, `stats`,
-  `drops`, `changes [<epoch> <seq>]`, `blocks [after <id>]`, `arm`,
-  `disarm`, `drop <cidr> [ttl=<sec>]`, `undrop <cidr>`, `reload`. The
-  read-only socket (`-R`, `/run/voidgate-monitor.sock`) answers only the
-  first five. Every block, lift, arm, disarm and reload goes in the change
+  `changes [<epoch> <seq>]`, `blocks [after <id>]`, `arm`, `disarm`,
+  `block <cidr> [ttl=<sec>]`, `unblock <cidr>`, `reload`. The read-only
+  socket (`-R`, `/run/voidgate-monitor.sock`) answers only the first
+  four. The words for what voidgate installs are block, blocked and
+  unblock, in commands, keys, change causes and logs; drop is what XDP
+  does to a packet. Every block, lift, arm, disarm and reload goes in the change
   stream (`change_add()` in `policy.c`), with the socket caller's uid or
   `self`: a new way to change state records its change too.
   Replies starting with `error` make `voidgatectl` exit 1. Keep the
-  `drops` line format (`<cidr> reason=N age=N`): the Lua client and
-  tests anchor on it.
+  `blocks` and `stats` key=value formats: sw_logd, the Lua client and
+  tests parse them. `status` is the gate's state, `stats` the counters
+  alone: a key belongs to one of them. `voidgatectl` prints tables, `-r`
+  the daemon's answer.
 - `reload` re-reads the config file and replaces allow/local maps +
   ports. First it lifts every drop (manual included) that now covers
   `local_*` or `allow_*`, so invariant 4 holds for existing drops too.

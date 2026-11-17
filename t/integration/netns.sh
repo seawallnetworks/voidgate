@@ -1,5 +1,5 @@
 #!/bin/bash
-# Integration: veth pair, daemon starts IDLE, flood wakes it, drop works.
+# Integration: veth pair, daemon starts IDLE, flood wakes it, block works.
 # VG_HOOK=tc judges at TC ingress. Runs in private namespaces
 # (t/bin/create_env.sh), so a running voidgate is never reached.
 set -euo pipefail
@@ -49,7 +49,7 @@ for _ in $(seq 50); do
   "$CTL" status >/dev/null 2>&1 && break
   sleep 0.1
 done
-STATUS=$("$CTL" status || true)
+STATUS=$("$CTL" -r status || true)
 echo "initial: $STATUS"
 echo "$STATUS" | grep -q 'state=idle' || { echo "expected idle"; exit 1; }
 
@@ -69,26 +69,26 @@ PY
 
 flood
 sleep 0.5
-STATUS=$("$CTL" status)
+STATUS=$("$CTL" -r status)
 echo "during flood: $STATUS"
 echo "$STATUS" | grep -q 'state=active' || {
     echo "expected active after flood"
-    "$CTL" stats
+    "$CTL" -r stats
     exit 1
 }
 
-"$CTL" drop 198.51.100.1/32
-"$CTL" drops
+"$CTL" block 198.51.100.1/32
+"$CTL" blocks
 flood
-STATS=$("$CTL" stats)
-echo "stats after drop: $STATS"
+STATS=$("$CTL" -r stats)
+echo "stats after block: $STATS"
 echo "$STATS" | grep -E 'dropped=[1-9]' || {
     echo "expected dropped > 0"
     exit 1
 }
 
 "$CTL" disarm
-STATUS=$("$CTL" status)
+STATUS=$("$CTL" -r status)
 echo "after disarm: $STATUS"
 echo "$STATUS" | grep -q 'state=idle' || {
     echo "expected idle after disarm"

@@ -18,7 +18,7 @@ ExecStartPre=+/usr/local/seawall/libexec/voidgate-mkconf
 # as sw_configd, may connect, with the whole protocol. For root alone,
 # drop -g with "systemctl edit voidgate". -R sw_monitor: the read-only
 # socket, /run/voidgate-monitor.sock. -B voidgate_ban: the ban socket,
-# /run/voidgate-ban.sock, drops of one address with a ttl only, for
+# /run/voidgate-ban.sock, blocks of one address with a ttl only, for
 # gateways and applications banning through voidgate.lua. In the foreground (no -d) it
 # logs to stderr, the journal; log_file is for -d.
 ExecStart=/usr/local/seawall/sbin/voidgate -c /usr/local/seawall/etc/voidgate/voidgate.conf -g voidgate -R sw_monitor -B voidgate_ban

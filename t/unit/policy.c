@@ -589,7 +589,7 @@ test_expire_log(void)
                                "198.18.9.2/32 (timed), 198.18.9.3/32 (timed), "
                                "198.18.9.4/32 (policy); 0 left") == 1);
         assert(log_count(path, "expired") == 1);
-        assert(log_count(path, "undrop") == 0);
+        assert(log_count(path, "unblock") == 0);
         assert(log_count(path, "expire 198.18.9.") == (verbose ? 4 : 0));
 
         unlink(path);
@@ -646,14 +646,14 @@ test_drop_log(void)
         sw_log_set_level(SW_LOG_INFO);
         log_stop(saved);
 
-        assert(log_count(path, "dropped 198.18.10.1/32 (timed), "
+        assert(log_count(path, "blocked 198.18.10.1/32 (timed), "
                                "198.18.10.2/32 (timed), 198.18.10.3/32 (timed), "
                                "198.18.10.4/32 (policy); 1 again, 4 listed")
                == 1);
-        assert(log_count(path, "[INFO] dropped ") == 1);
-        assert(log_count(path, "refuse drop 169.254.169.254/32") == 1);
-        assert(log_count(path, "drop 198.18.10.") == (verbose ? 5 : 0));
-        assert(log_count(path, "drop 198.18.10.3/32 (timed) again")
+        assert(log_count(path, "[INFO] blocked ") == 1);
+        assert(log_count(path, "refuse block 169.254.169.254/32") == 1);
+        assert(log_count(path, "block 198.18.10.") == (verbose ? 5 : 0));
+        assert(log_count(path, "block 198.18.10.3/32 (timed) again")
                == verbose);
 
         unlink(path);
@@ -701,12 +701,12 @@ test_drop_log_burst(void)
 
     log_stop(saved);
 
-    assert(log_count(path, "dropped 10 prefixes (manual 0, policy 0, "
+    assert(log_count(path, "blocked 10 prefixes (manual 0, policy 0, "
                            "aggregate 0, timed 10), first 198.18.11.1/32 "
                            "(timed), ") == 1);
     assert(log_count(path, "198.18.11.8/32 (timed); 10 listed") == 1);
     assert(log_count(path, "198.18.11.9/32") == 0);
-    assert(log_count(path, "dropped 10 listed prefixes again; 10 listed")
+    assert(log_count(path, "blocked 10 listed prefixes again; 10 listed")
            == 1);
 
     unlink(path);
@@ -714,7 +714,7 @@ test_drop_log_burst(void)
 }
 
 
-/* An undrop or disarm before the tick logs the pending drops first: the
+/* An unblock or disarm before the tick logs the pending blocks first: the
  * log reads in order, and the tick does not name a lifted prefix.
  */
 static void
@@ -745,11 +745,11 @@ test_drop_log_order(void)
 
     log_stop(saved);
 
-    assert(log_count(path, "dropped 198.18.12.1/32 (timed); 1 listed") == 1);
-    assert(log_count(path, "dropped 198.18.12.2/32 (timed); 1 listed") == 1);
-    assert(log_count(path, "[INFO] dropped ") == 2);
-    assert(log_line_of(path, "dropped 198.18.12.1/32")
-           < log_line_of(path, "undrop 198.18.12.1/32"));
+    assert(log_count(path, "blocked 198.18.12.1/32 (timed); 1 listed") == 1);
+    assert(log_count(path, "blocked 198.18.12.2/32 (timed); 1 listed") == 1);
+    assert(log_count(path, "[INFO] blocked ") == 2);
+    assert(log_line_of(path, "blocked 198.18.12.1/32")
+           < log_line_of(path, "unblock 198.18.12.1/32"));
 
     unlink(path);
     vg_ctrl_free(&c);
@@ -842,7 +842,7 @@ v4(int a, int b, int c, int d, int len)
 
 /* The change stream (Seawall proposal 0012 §2): every block, lift, arm,
  * disarm and reload, in order, each the socket caller's or voidgate's own;
- * "drop list full" refusals summed per tick.
+ * "block list full" refusals summed per tick.
  */
 static void
 test_changes(void)
@@ -878,7 +878,7 @@ test_changes(void)
     ch = vg_ctrl_change(&c, 1);
     assert(ch->kind == VG_CHANGE_ARM && ch->source == VG_SOURCE_SOCKET
            && ch->uid == 1000);
-    assert(strcmp(ch->cause, "manual-drop") == 0 && ch->time_ms > 0);
+    assert(strcmp(ch->cause, "manual-block") == 0 && ch->time_ms > 0);
     ch = vg_ctrl_change(&c, 2);
     assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_SOCKET
            && ch->uid == 1000);
@@ -919,14 +919,14 @@ test_changes(void)
     assert(vg_ctrl_undrop(&c, &p[0]) == 0);
     vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
     log_stop(saved);
-    assert(log_count(path, "refused 3 drops: drop list full (4)") == 1);
+    assert(log_count(path, "refused 3 blocks: block list full (4)") == 1);
     assert(log_count(path, "refused:") == 0);
     assert(c.refused_full == 0);
     unlink(path);
 
     ch = vg_ctrl_change(&c, 7);
     assert(ch->kind == VG_CHANGE_UNBLOCK && ch->source == VG_SOURCE_SOCKET && ch->uid == 0);
-    assert(strcmp(ch->cause, "undrop") == 0 && ch->id == 1);
+    assert(strcmp(ch->cause, "unblock") == 0 && ch->id == 1);
     assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
 
     /* not listed: nothing lifted, no change */

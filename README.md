@@ -76,7 +76,7 @@ upgrades keep it. `make uninstall` keeps it too.
 ```
 sudo ./voidgate -c configs/voidgate.conf -i eth0
 sudo ./voidgatectl status
-sudo ./voidgatectl drop 203.0.113.0/24
+sudo ./voidgatectl block 203.0.113.0/24
 sudo ./voidgatectl disarm
 ```
 
@@ -147,7 +147,7 @@ config fails instead, `hook = tc` always takes TC.
 Monitoring reads the gate without being able to change it (Seawall
 proposal 0012 §2). `-R <group>` opens `/run/voidgate-monitor.sock`,
 `0660 root:<group>`; the shipped unit runs `-R sw_monitor`. It answers
-`status`, `stats`, `drops`, `changes` and `blocks`, and every other
+`status`, `stats`, `changes` and `blocks`, and every other
 command with `error: read-only socket`. The control socket answers all
 of them.
 
@@ -160,24 +160,26 @@ voidgatectl -s /run/voidgate-monitor.sock changes
 
   ```
   epoch=9f2c41d07a6be3e1 seq=3 oldest=1 gap=0 n=2 more=0
-  seq=2 time=1763150000123 kind=arm source=socket uid=0 cause=manual-drop
+  seq=2 time=1763150000123 kind=arm source=socket uid=0 cause=manual-block
   seq=3 time=1763150000123 kind=block source=socket uid=0 id=1 cidr=198.18.0.1/32 reason=manual expires=0
   ```
 
   `source=socket` is a command on the control socket, `source=ban` a
-  drop on the ban socket (below), both with the caller's uid
+  block on the ban socket (below), both with the caller's uid
   (`SO_PEERCRED`); a change the command causes, such as the arm before
-  a drop on an idle gate (`cause=manual-drop`, or `cause=ban`), is the
-  caller's too. `source=self` is voidgate's own:
-  the wake threshold, policy and aggregate drops, timed lifts (`cause=
-  expired`). `disarm` lifts every block, in one change. `more=1`: read
+  a block on an idle gate (`cause=manual-block`, or `cause=ban`), is the
+  caller's too; `unblock` lifts with `cause=unblock`. `source=self` is
+  voidgate's own: the wake threshold, policy and aggregate blocks, timed
+  lifts (`cause=expired`). `disarm` lifts every block, in one change. `more=1`: read
   again from the last seq.
 - The epoch is drawn at each start; a reload keeps it. A cursor of
   another epoch, older than the last 8192 changes, or not reached yet, is
   a gap (`gap=1`, no changes): read the blocks back, and carry on from
   that reply's seq.
 - `blocks`, then `blocks after <next>` until `next=end`: every listed
-  block, 256 a page, oldest first by id (ids only grow).
+  block, 256 a page, oldest first by id (ids only grow). `voidgatectl
+  blocks` reads every page and prints one table; `voidgatectl -r blocks`
+  prints the daemon's first page, as below.
 
   ```
   epoch=9f2c41d07a6be3e1 seq=3 n=1 next=end
@@ -188,7 +190,7 @@ voidgatectl -s /run/voidgate-monitor.sock changes
 
 voidgate is not a WAF. Let OpenResty, or a gateway built on it such as Kong
 or APISIX, decide which client is abusive (`limit_req`, failed logins, bot
-rules) and push that address down to XDP with a timed drop. The design and
+rules) and push that address down to XDP with a timed block. The design and
 its trade-offs are in [`doc/l7-bridge.md`](doc/l7-bridge.md).
 
 A complete OpenResty config is in
@@ -213,7 +215,7 @@ nginx workers do not run as root. `M.ban()` and `M.ban_now()` talk to
 the ban socket, `/run/voidgate-ban.sock` (Seawall proposal 0012 §2),
 which the shipped unit opens with `-B voidgate_ban`: `0660
 root:voidgate_ban`, the group from the seawall repo, which `make
-install` needs first. It takes only `drop <address> ttl=<seconds>`,
+install` needs first. It takes only `block <address> ttl=<seconds>`,
 one address (`/32`, `/128` or bare, never a network), and refuses
 everything else (`error: denied: ...`): a gateway or an application
 server that faces the internet, if compromised, can block single
@@ -229,7 +231,7 @@ sudo usermod -aG voidgate_ban kong
 `M.ban_now()` used `/run/voidgate.sock`, and the workers' user was told
 to join `voidgate`. They now use the ban socket: until that user joins
 `voidgate_ban`, every ban fails, with only a line in nginx's error log
-(`voidgate: drop ...: permission denied`). Add it to `voidgate_ban`,
+(`voidgate: block ...: permission denied`). Add it to `voidgate_ban`,
 restart the gateway, then take it out of `voidgate`
 (`sudo gpasswd -d kong voidgate`) unless it also calls the other
 methods, which need the control socket.
@@ -258,7 +260,7 @@ container's worker must have the same numeric gid as the group on the host.
 A group missing from `/etc/group`, or a failed chown, stops the start
 before voidgate touches the NIC.
 
-The client's methods (`status`, `disarm`, `drop` and the rest, through
+The client's methods (`status`, `disarm`, `block` and the rest, through
 `M.new()`) use the control socket, `/run/voidgate.sock`, `0660
 root:voidgate` (`-g voidgate`). Its members get the whole protocol,
 `disarm` and `reload` included: as good as root over voidgate. Join
@@ -293,20 +295,21 @@ When the caller needs the daemon's answer, for example in `access_by_lua*`
 or a timer, use `ban_now(ip, ttl)`: the same rules, sent at once, returning
 `true` or `nil, err` (a refused address, a daemon that is down). It needs a
 cosocket, so in the log phase it returns `nil, "no cosocket in this phase,
-use ban()"`. Every drop from Lua has a ttl; a permanent drop is an
-operator's decision (`voidgatectl drop <cidr>`).
+use ban()"`. Every block from Lua has a ttl; a permanent block is an
+operator's decision (`voidgatectl block <cidr>`).
 
-The ban is `drop <ip> ttl=<ttl>` on the socket (`reason=4`). It lifts itself
-after `ttl` seconds (1 to one year). Banning the same prefix again only
-extends it, a manual `drop` of it makes it permanent, and timed drops never
-count toward `aggregate_k`, so a few bans behind one NAT do not become a
-`/24` drop. Like every drop, a ban arms the gate until it lifts, and
+The ban is `block <ip> ttl=<ttl>` on the socket (`reason=timed`). It lifts
+itself after `ttl` seconds (1 to one year). Banning the same prefix again
+only extends it, a manual `block` of it makes it permanent, and timed
+blocks never count toward `aggregate_k`, so a few bans behind one NAT do
+not become a `/24` block. Like every block, a ban arms the gate until it
+lifts, and
 `disarm` or a daemon restart forgets it.
 
 Ban only real peers. Behind a CDN or load balancer, take the client address
 from the proxy header only for trusted proxies (`set_real_ip_from`), and put
 the proxy ranges in `allow_networks`. Otherwise a forged header bans your
-own front door. The daemon refuses drops that cover `allow_networks` or
+own front door. The daemon refuses blocks that cover `allow_networks` or
 `local_networks`.
 
 ### Methods
@@ -319,8 +322,12 @@ ngx.say(status.state, " ", status.rx_pps)
 
 local ok, err = vg.ban_now("203.0.113.7", 600)  -- 10m; the daemon's answer
 
-assert(vg.drop("203.0.113.0/24", 600))           -- 10m; a prefix, ttl required
-assert(vg.undrop("203.0.113.0/24"))
+assert(vg.block("203.0.113.0/24", 600))          -- 10m; a prefix, ttl required
+assert(vg.unblock("203.0.113.0/24"))
+
+for _, b in ipairs(assert(vg.blocks())) do       -- every block, oldest first
+    ngx.say(b.cidr, " ", b.reason, " ", b.expires)
+end
 
 -- Optional settings; each call opens and closes its own connection.
 local client = vg.new({ path = "/run/voidgate.sock", timeout = 1 })
@@ -335,21 +342,22 @@ The full table is in `doc/l7-bridge.md` §9.
 
 | Method | Successful return |
 | --- | --- |
-| `status()` | Table: `state`, boolean `armed`, numeric `rx_pps`, `rx_bps`, `prefixes`, string `iface` |
-| `stats()` | Table: counters as decimal strings; numeric rates and prefix count; string `state` |
-| `drops()` | Array of `{ cidr, reason, age }` entries; empty array when there are no drops |
+| `status()` | Table: `state`, boolean `armed`, numeric `rx_pps`, `rx_bps`, `blocked`, string `iface` |
+| `stats()` | Table: the counters, as decimal strings; the rates, `blocked` and `state` are `status()`'s |
+| `blocks()` | Array of `{ id, cidr, reason, inserted, expires }`, oldest first, every page read; empty when nothing is blocked |
 | `arm()`, `disarm()`, `reload()` | `true` |
-| `drop(cidr, ttl)`, `undrop(cidr)` | `true`; `ttl` (seconds, 1–31536000) is required, and the daemon lifts the drop itself |
+| `block(cidr, ttl)`, `unblock(cidr)` | `true`; `ttl` (seconds, 1–31536000) is required, and the daemon lifts the block itself |
 | `ban(ip, ttl [, opt])` | `true` once queued; see above |
 | `ban_now(ip, ttl [, opt])` | `true`, or `nil, err` with the daemon's answer |
 
 Operations return `nil, error` on connection, timeout, or daemon errors.
 CIDR validity is checked by the daemon; the client only rejects a CIDR
 that contains whitespace. `stats()` keeps `rx_pkts`, `rx_bytes`, `passed`,
-`dropped`, `non_ip`, `map_full`, and `parse_err` as strings to avoid
-precision loss. Drop `reason` and `age` (seconds) are numbers. The
-default timeout is one second per socket operation. The daemon has an
-8192-byte response buffer, so large `drops()` lists may be truncated.
+`dropped`, `non_ip`, `map_full`, `parse_err` and `reply_passed` as strings
+to avoid precision loss. A block's `reason` is `manual`, `policy`, `aggregate` or
+`timed`; `id`, `inserted` and `expires` (Unix seconds) are numbers.
+`expires` is a timed block's lift time, else 0: a manual block never
+expires, a policy or aggregate one `ban_time` after `inserted`. The default timeout is one second per socket operation.
 
 The protocol is one newline-terminated command per connection, followed by a
 text response and connection close. Commands are limited to 254 bytes before

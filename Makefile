@@ -111,6 +111,7 @@ t/unit/cidr: t/unit/cidr.c src/config.o src/ipaddr.o src/log.o $(LIBSW_A)
 test: all
 	./t/unit/policy
 	./t/unit/cidr
+	./t/unit/voidgatectl.sh
 	sudo t/bin/run
 	sudo VG_HOOK=tc t/bin/run
 	sudo VG_HOOK=tc SW_NO_TCX=1 t/bin/run

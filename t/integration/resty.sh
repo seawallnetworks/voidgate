@@ -46,7 +46,7 @@ trap cleanup EXIT
 cp "$root/t/conf/idle.conf" "$conf"
 printf 'log_file = %s\n' "$work/daemon.log" >> "$conf"
 printf 'pid_file = %s\n' "$work/voidgate.pid" >> "$conf"
-# -v: one log line per drop, so the dedup check below can count them.
+# -v: one log line per block, so the dedup check below can count them.
 # -B: ban() and ban_now() use the ban socket.
 timeout --kill-after=2 10 "$root/voidgate" -d -v -g nogroup -B nogroup -c "$conf"
 
@@ -84,10 +84,10 @@ http {
             content_by_lua_file $work/resty.lua;
         }
 
-        location = /drops {
+        location = /blocks {
             content_by_lua_block {
-                for _, d in ipairs(assert(require("resty.voidgate").drops())) do
-                    ngx.say(d.cidr, " ", d.reason)
+                for _, b in ipairs(assert(require("resty.voidgate").blocks())) do
+                    ngx.say(b.cidr, " ", b.reason)
                 end
             }
         }
@@ -125,13 +125,13 @@ get() {
         "http://127.0.0.1:8080$1"
 }
 
-wait_drops() {
+wait_blocks() {
     local i
     for i in $(seq 50); do
-        [[ $(get /drops) == "$1" ]] && return 0
+        [[ $(get /blocks) == "$1" ]] && return 0
         sleep 0.1
     done
-    echo "drops: want '$1', got '$(get /drops)'" >&2
+    echo "blocks: want '$1', got '$(get /blocks)'" >&2
     return 1
 }
 
@@ -144,14 +144,14 @@ for i in $(seq 50); do
     get '/ban?ip=198.18.0.20' > /dev/null
 done
 get '/ban?ip=2001:db8::20' > /dev/null
-wait_drops $'198.18.0.20/32 4\n2001:db8::20/128 4'
-[[ $(grep -c 'drop 198.18.0.20/32 (timed)' "$work/daemon.log") == 1 ]]
+wait_blocks $'198.18.0.20/32 timed\n2001:db8::20/128 timed'
+[[ $(grep -c 'block 198.18.0.20/32 (timed)' "$work/daemon.log") == 1 ]]
 # The per-tick summary lands on the next tick (idle_poll_ms).
 for i in $(seq 30); do
-    grep -q '\] dropped .*198.18.0.20/32 (timed)' "$work/daemon.log" && break
+    grep -q '\] blocked .*198.18.0.20/32 (timed)' "$work/daemon.log" && break
     sleep 0.1
 done
-grep -q '\] dropped .*198.18.0.20/32 (timed)' "$work/daemon.log"
+grep -q '\] blocked .*198.18.0.20/32 (timed)' "$work/daemon.log"
 get '/ban?ip=1.2.3.4/24' > /dev/null
 get '/ban_now_log?ip=198.18.0.30' > /dev/null
 sleep 0.2
@@ -159,8 +159,8 @@ grep -q 'ban: bad ip' "$prefix/error.log"
 grep -q 'ban_now from log: nil no cosocket in this phase, use ban()' \
     "$prefix/error.log"
 refute grep -q 'failed to run log_by_lua' "$prefix/error.log"
-drops=$("$root/voidgatectl" drops)
-refute grep -q '198.18.0.30/32' <<< "$drops"
+blocks=$("$root/voidgatectl" -r blocks)
+refute grep -q '198.18.0.30/32' <<< "$blocks"
 # The "missing socket" check in resty.lua makes nginx's core log a [crit]
 # connect() failure; anything else at crit or alert is a bug.
 grep '\[alert\]\|\[crit\]' "$prefix/error.log" \

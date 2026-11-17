@@ -15,7 +15,7 @@ enum vg_state { VG_IDLE = 0, VG_ACTIVE = 1 };
 
 #define VG_SNAP_BUCKETS  4096
 
-/* Prefixes a tick's "dropped" and "expired" lines name; past this many
+/* Prefixes a tick's "blocked" and "expired" lines name; past this many
  * the line gives counts by reason after the first ones.
  */
 #define VG_LOG_CIDRS  8

@@ -9,12 +9,12 @@
 -- process). A method called where cosockets are disabled returns
 -- nil, err instead of raising.
 --
--- Lua cannot install a permanent drop: every drop needs a ttl. A permanent
--- drop is an operator's decision (voidgatectl drop <cidr>).
+-- Lua cannot install a permanent block: every block needs a ttl. A
+-- permanent block is an operator's decision (voidgatectl block <cidr>).
 --
 -- M.ban() and M.ban_now() use the ban socket, /run/voidgate-ban.sock
--- (group voidgate_ban), which takes only one address's drop with a ttl
--- (a network or a drop without one is refused). The other
+-- (group voidgate_ban), which takes only one address's block with a ttl
+-- (a network or a block without one is refused). The other
 -- methods, through M.new(), use the control socket, /run/voidgate.sock
 -- (group voidgate), the whole protocol.
 
@@ -29,7 +29,7 @@ local MAX_TTL = 31536000    -- one year, as the daemon
 -- Keep uint64 counters as strings so LuaJIT does not round them.
 local counters = {
     rx_pkts = true, rx_bytes = true, passed = true, dropped = true,
-    non_ip = true, map_full = true, parse_err = true,
+    non_ip = true, map_full = true, parse_err = true, reply_passed = true,
 }
 
 -- One command per connection: the daemon replies and closes.
@@ -101,24 +101,49 @@ function client:stats()
     return kv(data)
 end
 
-function client:drops()
-    local data, err = request(self, "drops")
-    if not data then
-        return nil, err
-    end
+-- Every listed block, oldest first, read page by page: { id, cidr,
+-- reason ("manual", "policy", "aggregate", "timed"), inserted, expires }
+-- (Unix seconds). expires is a timed block's lift time, else 0: a manual
+-- block never expires, a policy or aggregate one ban_time after inserted.
+-- A voidgate restarted between pages is an error: its ids start over.
+function client:blocks()
+    local out, cmd, after, first = {}, "blocks", 0, nil
 
-    local out = {}
-    for line in data:gmatch("[^\n]+") do
-        local cidr, reason, age = line:match("^(%S+) reason=(%S+) age=(%S+)$")
-        if cidr then
-            out[#out + 1] = {
-                cidr = cidr,
-                reason = tonumber(reason) or reason,
-                age = tonumber(age) or age,
-            }
+    while true do
+        local data, err = request(self, cmd)
+        if not data then
+            return nil, err
         end
+
+        local epoch, next_id = data:match("^epoch=(%x+) [^\n]* next=(%S+)\n")
+        if not next_id then
+            return nil, "unexpected response"
+        end
+        first = first or epoch
+        if epoch ~= first then
+            return nil, "voidgate restarted while the blocks were read"
+        end
+
+        for line in data:gmatch("\n(id=[^\n]+)") do
+            local b = kv(line)
+            if not b.cidr then
+                return nil, "unexpected response"
+            end
+            out[#out + 1] = b
+        end
+
+        if next_id == "end" then
+            return out
+        end
+
+        -- ids only grow: a next not past the last one would never end
+        local n = tonumber(next_id)
+        if not n or n <= after then
+            return nil, "unexpected response"
+        end
+        after = n
+        cmd = "blocks after " .. next_id
     end
-    return out
 end
 
 local function commit(self, cmd)
@@ -144,9 +169,9 @@ function client:reload()
     return commit(self, "reload")
 end
 
--- Drop a prefix for ttl seconds (required, 1 .. one year); the daemon
--- lifts it itself. No ttl is "bad ttl": a permanent drop is not for Lua.
-function client:drop(cidr, ttl)
+-- Block a prefix for ttl seconds (required, 1 .. one year); the daemon
+-- lifts it itself. No ttl is "bad ttl": a permanent block is not for Lua.
+function client:block(cidr, ttl)
     if type(cidr) ~= "string" or cidr:find("%s") then
         return nil, "bad cidr"
     end
@@ -154,14 +179,14 @@ function client:drop(cidr, ttl)
     if not ttl then
         return nil, "bad ttl"
     end
-    return commit(self, string.format("drop %s ttl=%d", cidr, ttl))
+    return commit(self, string.format("block %s ttl=%d", cidr, ttl))
 end
 
-function client:undrop(cidr)
+function client:unblock(cidr)
     if type(cidr) ~= "string" or cidr:find("%s") then
         return nil, "bad cidr"
     end
-    return commit(self, "undrop " .. cidr)
+    return commit(self, "unblock " .. cidr)
 end
 
 -- opt: path (default /run/voidgate.sock), timeout in seconds (default 1).
@@ -177,7 +202,8 @@ local default = M.new()
 -- ban() and ban_now()'s, unless opt.client is given
 local ban_default = M.new({ path = "/run/voidgate-ban.sock" })
 for _, name in ipairs({
-    "status", "stats", "drops", "arm", "disarm", "drop", "undrop", "reload",
+    "status", "stats", "blocks", "arm", "disarm", "block", "unblock",
+    "reload",
 }) do
     M[name] = function(...)
         return default[name](default, ...)
@@ -197,9 +223,9 @@ local function ban_timer(premature, c, cidr, ttl)
         return
     end
 
-    local ok, err = c:drop(cidr, ttl)
+    local ok, err = c:block(cidr, ttl)
     if not ok then
-        ngx.log(ngx.ERR, "voidgate: drop ", cidr, " ttl=", ttl, ": ", err)
+        ngx.log(ngx.ERR, "voidgate: block ", cidr, " ttl=", ttl, ": ", err)
     end
 end
 
@@ -256,7 +282,7 @@ function M.ban_now(ip, ttl, opt)
     if not cidr then
         return nil, "bad ip"
     end
-    return ((opt and opt.client) or ban_default):drop(cidr, ttl)
+    return ((opt and opt.client) or ban_default):block(cidr, ttl)
 end
 
 return M

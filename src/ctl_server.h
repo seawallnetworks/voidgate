@@ -15,9 +15,9 @@ int vg_ctl_server_listen(const char *path, const char *group, char *err,
 /* Which socket a connection came on, and so what it may do. */
 enum vg_ctl_mode {
     VG_CTL_FULL = 0,    /* the control socket: every command */
-    VG_CTL_READ,        /* the read-only socket: status, stats, drops,
-                           changes and blocks */
-    VG_CTL_BAN          /* the ban socket: drop <address> ttl=N only, one
+    VG_CTL_READ,        /* the read-only socket: status, stats, changes
+                           and blocks */
+    VG_CTL_BAN          /* the ban socket: block <address> ttl=N only, one
                            address; its changes from source "ban" */
 };
 

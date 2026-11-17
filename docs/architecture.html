@@ -58,7 +58,7 @@
                     <li class="cut">
                         <span class="layer-idx">03 · Cut</span>
                         <h3>Drop the hosts</h3>
-                        <p>Drop LPM. A remote over <code>threshold_pps</code> / <code>threshold_mbps</code> becomes <code>/32</code> or <code>/128</code>. Manual <code>voidgatectl drop</code> is this layer and does not expire.</p>
+                        <p>Drop LPM. A remote over <code>threshold_pps</code> / <code>threshold_mbps</code> becomes <code>/32</code> or <code>/128</code>. Manual <code>voidgatectl block</code> is this layer and does not expire.</p>
                     </li>
                     <li class="widen">
                         <span class="layer-idx">04 · Widen</span>
@@ -171,7 +171,7 @@
                         <div class="transition to-active">
                             <span class="t-label">arm</span>
                             <svg viewBox="0 0 160 12" preserveAspectRatio="none" aria-hidden="true"><line x1="0" y1="6" x2="150" y2="6"/><path d="M148 1 L158 6 L148 11 Z"/></svg>
-                            <span class="t-cond"><code>wake_pps</code> / <code>wake_mbps</code> exceeded, or <code>ctl arm</code> / <code>drop</code></span>
+                            <span class="t-cond"><code>wake_pps</code> / <code>wake_mbps</code> exceeded, or <code>ctl arm</code> / <code>block</code></span>
                         </div>
                         <div class="transition to-idle">
                             <span class="t-label">disarm</span>
@@ -191,8 +191,8 @@
                 </div>
 
                 <h2>Policy, once a second</h2>
-                <p>In ACTIVE, userspace walks remotes. A source over <code>threshold_pps</code> or <code>threshold_mbps</code> is inserted as <code>/32</code> or <code>/128</code> (<code>reason=policy</code>). If at least <code>aggregate_k</code> dropped hosts sit in the same <code>/24</code> or <code>/64</code>, that prefix is inserted too (<code>reason=aggregate</code>). Policy and aggregate drops expire after <code>ban_time</code>. Manual drops do not. A timed drop (<code>drop &lt;cidr&gt; ttl=&lt;sec&gt;</code>, <code>reason=4</code>, from OpenResty) expires after its own ttl and is not counted for aggregation, so a few web bans behind one NAT never become a <code>/24</code>.</p>
-                <p>ACTIVE returns to IDLE when the NIC has been quiet for <code>clear_seconds</code> <em>and</em> the drop tree is empty. <code>voidgatectl drop</code> forces ACTIVE. <code>voidgatectl disarm</code> flushes drops and returns IDLE.</p>
+                <p>In ACTIVE, userspace walks remotes. A source over <code>threshold_pps</code> or <code>threshold_mbps</code> is inserted as <code>/32</code> or <code>/128</code> (<code>reason=policy</code>). If at least <code>aggregate_k</code> dropped hosts sit in the same <code>/24</code> or <code>/64</code>, that prefix is inserted too (<code>reason=aggregate</code>). Policy and aggregate blocks expire after <code>ban_time</code>. Manual blocks do not. A timed block (<code>block &lt;cidr&gt; ttl=&lt;sec&gt;</code>, <code>reason=timed</code>, from OpenResty) expires after its own ttl and is not counted for aggregation, so a few web bans behind one NAT never become a <code>/24</code>.</p>
+                <p>ACTIVE returns to IDLE when the NIC has been quiet for <code>clear_seconds</code> <em>and</em> the drop tree is empty. <code>voidgatectl block</code> forces ACTIVE. <code>voidgatectl disarm</code> lifts every block and returns IDLE.</p>
 
                 <h2>Do not blackhole the VM</h2>
                 <ul class="checks">
