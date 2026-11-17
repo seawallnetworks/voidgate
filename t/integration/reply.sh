@@ -453,8 +453,10 @@ start_vg
 "$CTL" unblock 198.51.100.1/32 > /dev/null 2>&1 || true
 download 198.51.100.1 > /dev/null
 sleep 0.5
-[[ $(stat state) == active ]] || fail "without the table a download wakes the gate"
-(( $(stat rx_reply_pkts) == 0 )) || fail "without the table no reply is counted"
+[[ $(stat state) == active ]] \
+    || fail "without the table a download wakes the gate"
+(( $(stat rx_reply_pkts) == 0 )) \
+    || fail "without the table no reply is counted"
 blocked 198.51.100.1/32 || fail "without the table the server should be blocked"
 echo "ok - after sw_flowd -P, a restarted voidgate runs without the table"
 

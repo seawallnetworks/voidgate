@@ -473,8 +473,8 @@ stats_once(const char *path)
 /*
  * status as one row: a column for each key=value the daemon gives, in
  * its order, so a new key needs no change here; but the rates, rx_pps,
- * rx_bps, wake_rx_pps and wake_rx_bps, which are traffic. A line without "=" (CRITICAL)
- * comes first, as is.
+ * rx_bps, wake_rx_pps and wake_rx_bps, which are traffic. A line
+ * without "=" (CRITICAL) comes first, as is.
  */
 static int
 status_table(const char *path)
