@@ -10,7 +10,7 @@
 #include <linux/types.h>
 
 #define VG_SOCK_PATH  "/run/voidgate.sock"
-/* read-only: status, stats, changes, blocks (Seawall proposal 0012) */
+/* read-only: status, stats, feed, blocks (Seawall proposal 0012) */
 #define VG_MONITOR_SOCK_PATH  "/run/voidgate-monitor.sock"
 #define VG_BAN_SOCK_PATH      "/run/voidgate-ban.sock"
 

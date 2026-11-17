@@ -203,7 +203,7 @@ usage(void)
             "stats [<interval> [<count>]]|\n"
             "       blocks [after <id>]|block <cidr> [ttl=<sec>]|"
             "unblock <cidr>|\n"
-            "       arm|disarm|reload|changes [<epoch> <seq>]\n"
+            "       arm|disarm|reload|feed [<epoch> <seq>]\n"
             "  -r  the daemon's answer as is (status, stats, blocks: "
             "key=value)\n"
             "  -s  default " VG_SOCK_PATH "; read-only: "

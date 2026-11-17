@@ -21,8 +21,8 @@
 
 #define VG_MAX_BLOCK_TTL  31536000     /* one year */
 
-/* A reply's room: VG_REPLY_SIZE for most commands; a page of changes or
- * blocks gets more.
+/* A reply's room: VG_REPLY_SIZE for most commands; a page of the feed
+ * or of blocks gets more.
  */
 #define VG_REPLY_SIZE       8192
 #define VG_PAGE_REPLY_SIZE  65536
@@ -59,9 +59,9 @@ static int parse_ttl(const char *s, uint32_t *out);
 static int vg_ctrl_reload(struct vg_ctrl *c);
 static void ctl_reload(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
-static void ctl_changes(struct vg_ctrl *ctrl, const char *args,
+static void ctl_feed(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
-static int change_line(const struct vg_change *ch, char *out, size_t size);
+static int feed_line(const struct vg_feed_entry *ch, char *out, size_t size);
 static void ctl_blocks(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int parse_u64(const char *s, int base, uint64_t *out);
@@ -71,7 +71,7 @@ static int ban_allowed(const vg_ctl_command_t *cmd, const char *args);
 static const vg_ctl_command_t  vg_ctl_commands[] = {
     { "status",   0, 1, 0, ctl_status },
     { "stats",    0, 1, 0, ctl_stats },
-    { "changes",  1, 1, 1, ctl_changes },
+    { "feed",     1, 1, 1, ctl_feed },
     { "blocks",   1, 1, 1, ctl_blocks },
     { "arm",      0, 0, 0, ctl_arm },
     { "disarm",   0, 0, 0, ctl_disarm },
@@ -380,10 +380,10 @@ ctl_reload(struct vg_ctrl *ctrl, const char *args, char *reply,
 
 
 /*
- * "changes" alone: the cursor, to start from.
- * "changes <epoch> <seq>": the changes after seq, oldest first, as many as
+ * "feed" alone: the cursor, to start from.
+ * "feed <epoch> <seq>": the entries after seq, oldest first, as many as
  * fit; "more=1" if there are others after them. A cursor of another
- * epoch (voidgate restarted), older than the changes kept, or past the
+ * epoch (voidgate restarted), older than the entries kept, or past the
  * last one is a gap: none are sent, and the reader reads the blocks back
  * and carries on from the seq in this reply.
  *
@@ -393,17 +393,17 @@ ctl_reload(struct vg_ctrl *ctrl, const char *args, char *reply,
  *       expires=<Unix s, 0 if none>]
  */
 static void
-ctl_changes(struct vg_ctrl *ctrl, const char *args, char *reply,
+ctl_feed(struct vg_ctrl *ctrl, const char *args, char *reply,
     size_t reply_size)
 {
-    int                      w, gap, more;
-    char                    *body, line[256], e[24];
-    size_t                   used, n, len;
-    uint64_t                 epoch, from, s, oldest;
-    const char              *sp;
-    const struct vg_change  *ch;
+    int                          w, gap, more;
+    char                        *body, line[256], e[24];
+    size_t                       used, n, len;
+    uint64_t                     epoch, from, s, oldest;
+    const char                  *sp;
+    const struct vg_feed_entry  *ch;
 
-    oldest = vg_ctrl_changes_oldest(ctrl);
+    oldest = vg_ctrl_feed_oldest(ctrl);
     gap = 0;
     more = 0;
     n = 0;
@@ -416,7 +416,7 @@ ctl_changes(struct vg_ctrl *ctrl, const char *args, char *reply,
     sp = *args == ' ' ? strchr(args + 1, ' ') : NULL;
 
     if (sp == NULL || parse_u64(sp + 1, 10, &from) < 0) {
-        snprintf(reply, reply_size, "error: usage: changes <epoch> <seq>\n");
+        snprintf(reply, reply_size, "error: usage: feed <epoch> <seq>\n");
         return;
     }
 
@@ -456,13 +456,13 @@ header:
 
     /* room for the header, at most 80 bytes */
     for (s = from; s <= ctrl->seq; s++) {
-        ch = vg_ctrl_change(ctrl, s);
+        ch = vg_ctrl_feed_entry(ctrl, s);
 
         if (ch == NULL) {
             continue;
         }
 
-        w = change_line(ch, line, sizeof(line));
+        w = feed_line(ch, line, sizeof(line));
 
         if (used + (size_t) w + 80 >= reply_size) {
             more = 1;
@@ -485,7 +485,7 @@ header:
 
 
 static int
-change_line(const struct vg_change *ch, char *out, size_t size)
+feed_line(const struct vg_feed_entry *ch, char *out, size_t size)
 {
     static const char  *kinds[] = {
         "block", "unblock", "arm", "disarm", "reload"
@@ -511,7 +511,7 @@ change_line(const struct vg_change *ch, char *out, size_t size)
                  ? kinds[ch->kind] : "unknown",
                  vg_source_name(ch->source), uid, cause);
 
-    if (ch->kind == VG_CHANGE_BLOCK || ch->kind == VG_CHANGE_UNBLOCK) {
+    if (ch->kind == VG_FEED_BLOCK || ch->kind == VG_FEED_UNBLOCK) {
         vg_cidr_to_str(&ch->cidr, cidr, sizeof(cidr));
         n = snprintf(out + w, size - (size_t) w,
                      " id=%" PRIu64 " cidr=%s reason=%s expires=%lld",
@@ -721,7 +721,7 @@ vg_ctl_server_handle(struct vg_ctrl *ctrl, int cfd, int mode)
             continue;
         }
 
-        /* "changes" and "blocks" take arguments after a space, or none */
+        /* "feed" and "blocks" take arguments after a space, or none */
         if (cmd->prefix && cmd->name[len - 1] != ' '
             && req[len] != '\0' && req[len] != ' ')
         {

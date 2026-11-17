@@ -184,7 +184,7 @@ runs the verdicts at TC (`make test` runs all three hooks), and
   (packet specs: `t/lib/VG/Packet.pm`); if you change wake/arm, run
   `t/integration/netns.sh`.
 - Unix ctl protocol is one line in, text out: `status`, `stats`,
-  `changes [<epoch> <seq>]`, `blocks [after <id>]`, `arm`, `disarm`,
+  `feed [<epoch> <seq>]`, `blocks [after <id>]`, `arm`, `disarm`,
   `block <cidr> [ttl=<sec>]`, `unblock <cidr>`, `reload`. The read-only
   socket (`-R`, `/run/voidgate-monitor.sock`) answers only the first
   four. The words for what voidgate installs are block, blocked and

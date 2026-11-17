@@ -50,9 +50,9 @@ static void logged_list(char *out, size_t size,
 static void log_drops(struct vg_ctrl *c);
 static double tick_dt(struct vg_ctrl *c);
 static uint64_t draw_epoch(void);
-static struct vg_change *change_add(struct vg_ctrl *c, int kind,
+static struct vg_feed_entry *feed_add(struct vg_ctrl *c, int kind,
     const char *cause);
-static void change_block(struct vg_ctrl *c, int kind, const char *cause,
+static void feed_block(struct vg_ctrl *c, int kind, const char *cause,
     const struct vg_drop_rec *r, uint64_t id);
 
 
@@ -215,9 +215,9 @@ vg_ctrl_init(struct vg_ctrl *c, struct vg_config *cfg,
         return -1;
     }
 
-    c->changes = calloc(VG_CHANGES, sizeof(*c->changes));
+    c->feed = calloc(VG_FEED_SIZE, sizeof(*c->feed));
 
-    if (c->changes == NULL) {
+    if (c->feed == NULL) {
         free(c->drop_pool);
         free(c->drop_heads);
         free(c->snap_pool);
@@ -254,8 +254,8 @@ vg_ctrl_free(struct vg_ctrl *c)
     c->snap_pool = NULL;
     c->snap_free = NULL;
     c->snap_cap = 0;
-    free(c->changes);
-    c->changes = NULL;
+    free(c->feed);
+    c->feed = NULL;
 }
 
 
@@ -281,18 +281,18 @@ draw_epoch(void)
 /* The next change, its source the caller's; cause is copied with its
  * spaces as "-", so it stays one word on the protocol's lines.
  */
-static struct vg_change *
-change_add(struct vg_ctrl *c, int kind, const char *cause)
+static struct vg_feed_entry *
+feed_add(struct vg_ctrl *c, int kind, const char *cause)
 {
-    size_t             i;
-    struct timespec    ts;
-    struct vg_change  *ch;
+    size_t                 i;
+    struct timespec        ts;
+    struct vg_feed_entry  *ch;
 
-    if (c->changes == NULL) {
+    if (c->feed == NULL) {
         return NULL;
     }
 
-    ch = &c->changes[++c->seq % VG_CHANGES];
+    ch = &c->feed[++c->seq % VG_FEED_SIZE];
     memset(ch, 0, sizeof(*ch));
 
     clock_gettime(CLOCK_REALTIME, &ts);
@@ -317,12 +317,12 @@ change_add(struct vg_ctrl *c, int kind, const char *cause)
  * lift clears it).
  */
 static void
-change_block(struct vg_ctrl *c, int kind, const char *cause,
+feed_block(struct vg_ctrl *c, int kind, const char *cause,
     const struct vg_drop_rec *r, uint64_t id)
 {
-    struct vg_change  *ch;
+    struct vg_feed_entry  *ch;
 
-    ch = change_add(c, kind, cause);
+    ch = feed_add(c, kind, cause);
 
     if (ch != NULL) {
         ch->id = id;
@@ -352,29 +352,29 @@ vg_source_name(int source)
 void
 vg_ctrl_reloaded(struct vg_ctrl *c)
 {
-    (void) change_add(c, VG_CHANGE_RELOAD, "reload");
+    (void) feed_add(c, VG_FEED_RELOAD, "reload");
 }
 
 
-const struct vg_change *
-vg_ctrl_change(const struct vg_ctrl *c, uint64_t seq)
+const struct vg_feed_entry *
+vg_ctrl_feed_entry(const struct vg_ctrl *c, uint64_t seq)
 {
-    const struct vg_change  *ch;
+    const struct vg_feed_entry  *ch;
 
-    if (c->changes == NULL || seq == 0 || seq > c->seq) {
+    if (c->feed == NULL || seq == 0 || seq > c->seq) {
         return NULL;
     }
 
-    ch = &c->changes[seq % VG_CHANGES];
+    ch = &c->feed[seq % VG_FEED_SIZE];
 
     return ch->seq == seq ? ch : NULL;
 }
 
 
 uint64_t
-vg_ctrl_changes_oldest(const struct vg_ctrl *c)
+vg_ctrl_feed_oldest(const struct vg_ctrl *c)
 {
-    return c->seq >= VG_CHANGES ? c->seq - VG_CHANGES + 1 : 1;
+    return c->seq >= VG_FEED_SIZE ? c->seq - VG_FEED_SIZE + 1 : 1;
 }
 
 
@@ -584,7 +584,7 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         vg_hlist_add_head(&r->hash, &c->drop_heads[drop_hash(c, p)]);
         vg_list_add_tail(&r->all, &c->drop_all);
         c->drop_count++;
-        change_block(c, VG_CHANGE_BLOCK, NULL, r, r->id);
+        feed_block(c, VG_FEED_BLOCK, NULL, r, r->id);
 
     } else {
 
@@ -611,7 +611,7 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
             r->reason = reason;
             r->inserted = now;
             r->expires = expires;
-            change_block(c, VG_CHANGE_BLOCK, NULL, r, r->id);
+            feed_block(c, VG_FEED_BLOCK, NULL, r, r->id);
         }
     }
 
@@ -666,7 +666,7 @@ vg_ctrl_undrop(struct vg_ctrl *c, const struct vg_cidr *p)
             return -1;
         }
 
-        change_block(c, VG_CHANGE_UNBLOCK, "unblock", r, id);
+        feed_block(c, VG_FEED_UNBLOCK, "unblock", r, id);
 
     /* Not listed: still clear a stray map entry. */
     } else if (vg_drop_del(c->maps, p) < 0 && errno != ENOENT) {
@@ -709,7 +709,7 @@ vg_ctrl_prune_protected(struct vg_ctrl *c)
         id = r->id;
 
         if (drop_remove(c, r) == 0) {
-            change_block(c, VG_CHANGE_UNBLOCK, "reload", r, id);
+            feed_block(c, VG_FEED_UNBLOCK, "reload", r, id);
             n++;
         }
     }
@@ -734,7 +734,7 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
     }
 
     c->state = VG_ACTIVE;
-    (void) change_add(c, VG_CHANGE_ARM, why);
+    (void) feed_add(c, VG_FEED_ARM, why);
 
     if (c->caller_source != VG_SOURCE_SELF) {
         sw_log_info("armed (%s, %s uid %u)", why != NULL ? why : "",
@@ -750,7 +750,7 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
 
 /*
  * Unarmed first, then the drops flushed: a failed commit changes nothing,
- * so the drop list, and the change stream, still say what is in force.
+ * so the drop list, and the feed, still say what is in force.
  */
 int
 vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
@@ -767,7 +767,7 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
 
     c->state = VG_IDLE;
     c->quiet_since = 0;
-    (void) change_add(c, VG_CHANGE_DISARM, why);
+    (void) feed_add(c, VG_FEED_DISARM, why);
 
     if (c->caller_source != VG_SOURCE_SELF) {
         sw_log_info("disarmed (%s, %s uid %u)", why != NULL ? why : "",
@@ -960,7 +960,7 @@ expire_drops(struct vg_ctrl *c)
             continue;
         }
 
-        change_block(c, VG_CHANGE_UNBLOCK, "expired", r, id);
+        feed_block(c, VG_FEED_UNBLOCK, "expired", r, id);
 
         if (sw_log_enabled(SW_LOG_DEBUG)) {
             vg_cidr_to_str(&r->cidr, buf, sizeof(buf));

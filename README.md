@@ -147,16 +147,16 @@ config fails instead, `hook = tc` always takes TC.
 Monitoring reads the gate without being able to change it (Seawall
 proposal 0012 §2). `-R <group>` opens `/run/voidgate-monitor.sock`,
 `0660 root:<group>`; the shipped unit runs `-R sw_monitor`. It answers
-`status`, `stats`, `changes` and `blocks`, and every other
+`status`, `stats`, `feed` and `blocks`, and every other
 command with `error: read-only socket`. The control socket answers all
 of them.
 
 ```sh
-voidgatectl -s /run/voidgate-monitor.sock changes
+voidgatectl -s /run/voidgate-monitor.sock feed
 ```
 
-- `changes` gives the cursor; `changes <epoch> <seq>` every change after
-  it, oldest first: blocks added and lifted, arm, disarm and reload.
+- `feed` gives the cursor; `feed <epoch> <seq>` every change after it,
+  oldest first: blocks added and lifted, arm, disarm and reload.
 
   ```
   epoch=9f2c41d07a6be3e1 seq=3 oldest=1 gap=0 n=2 more=0
@@ -173,8 +173,8 @@ voidgatectl -s /run/voidgate-monitor.sock changes
   lifts (`cause=expired`). `disarm` lifts every block, in one change. `more=1`: read
   again from the last seq.
 - The epoch is drawn at each start; a reload keeps it. A cursor of
-  another epoch, older than the last 8192 changes, or not reached yet, is
-  a gap (`gap=1`, no changes): read the blocks back, and carry on from
+  another epoch, older than the last 8192 entries, or not reached yet,
+  is a gap (`gap=1`, no entries): read the blocks back, and carry on from
   that reply's seq.
 - `blocks`, then `blocks after <next>` until `next=end`: every listed
   block, 256 a page, oldest first by id (ids only grow). `voidgatectl

@@ -26,9 +26,9 @@ static void test_del_fail(void);
 static void test_expire_log(void);
 static void test_drop_log(void);
 static void test_pool(void);
-static void test_changes(void);
-static void test_changes_wrap(void);
-static void test_changes_ban(void);
+static void test_feed(void);
+static void test_feed_wrap(void);
+static void test_feed_ban(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
 static int log_count(const char *path, const char *needle);
@@ -845,15 +845,15 @@ v4(int a, int b, int c, int d, int len)
  * "block list full" refusals summed per tick.
  */
 static void
-test_changes(void)
+test_feed(void)
 {
-    struct vg_config         cfg;
-    struct vg_ctrl           c;
-    struct vg_cidr           p[6];
-    const struct vg_change  *ch;
-    char                     path[32];
-    int                      i, saved;
-    uint64_t                 s;
+    struct vg_config             cfg;
+    struct vg_ctrl               c;
+    struct vg_cidr               p[6];
+    const struct vg_feed_entry  *ch;
+    char                         path[32];
+    int                          i, saved;
+    uint64_t                     s;
 
     vg_config_defaults(&cfg);
     cfg.remote_map_size = 16;
@@ -863,8 +863,9 @@ test_changes(void)
     nitems = 0;
     assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
     assert(c.epoch != 0 && c.seq == 0);
-    assert(vg_ctrl_change(&c, 0) == NULL && vg_ctrl_change(&c, 1) == NULL);
-    assert(vg_ctrl_changes_oldest(&c) == 1);
+    assert(vg_ctrl_feed_entry(&c, 0) == NULL
+           && vg_ctrl_feed_entry(&c, 1) == NULL);
+    assert(vg_ctrl_feed_oldest(&c) == 1);
 
     for (i = 0; i < 6; i++) {
         p[i] = v4(198, 18, 12, i, 32);
@@ -875,12 +876,12 @@ test_changes(void)
     assert(vg_ctrl_drop(&c, &p[0], VG_REASON_MANUAL) == 0);
     vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
     assert(c.seq == 2);
-    ch = vg_ctrl_change(&c, 1);
-    assert(ch->kind == VG_CHANGE_ARM && ch->source == VG_SOURCE_SOCKET
+    ch = vg_ctrl_feed_entry(&c, 1);
+    assert(ch->kind == VG_FEED_ARM && ch->source == VG_SOURCE_SOCKET
            && ch->uid == 1000);
     assert(strcmp(ch->cause, "manual-block") == 0 && ch->time_ms > 0);
-    ch = vg_ctrl_change(&c, 2);
-    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_SOCKET
+    ch = vg_ctrl_feed_entry(&c, 2);
+    assert(ch->kind == VG_FEED_BLOCK && ch->source == VG_SOURCE_SOCKET
            && ch->uid == 1000);
     assert(ch->id == 1 && ch->reason == VG_REASON_MANUAL && ch->expires == 0);
     assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
@@ -889,13 +890,13 @@ test_changes(void)
      * re-drop that changes nothing isn't
      */
     assert(vg_ctrl_drop_ttl(&c, &p[1], 60) == 0);
-    ch = vg_ctrl_change(&c, 3);
-    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_SELF
+    ch = vg_ctrl_feed_entry(&c, 3);
+    assert(ch->kind == VG_FEED_BLOCK && ch->source == VG_SOURCE_SELF
            && ch->id == 2);
     assert(ch->reason == VG_REASON_TIMED && ch->expires > time(NULL));
     assert(vg_ctrl_drop_ttl(&c, &p[1], 600) == 0);
-    ch = vg_ctrl_change(&c, 4);
-    assert(ch->kind == VG_CHANGE_BLOCK && ch->id == 2);
+    ch = vg_ctrl_feed_entry(&c, 4);
+    assert(ch->kind == VG_FEED_BLOCK && ch->id == 2);
     assert(ch->expires >= time(NULL) + 599);
     assert(vg_ctrl_drop(&c, &p[0], VG_REASON_POLICY) == 0);
     assert(vg_ctrl_drop(&c, &p[1], VG_REASON_POLICY) == 0);
@@ -905,7 +906,7 @@ test_changes(void)
     assert(vg_ctrl_drop(&c, &p[2], VG_REASON_POLICY) == 0);
     assert(vg_ctrl_drop(&c, &p[3], VG_REASON_POLICY) == 0);
     assert(c.seq == 6);
-    snprintf(path, sizeof(path), "/tmp/vg-changes-log-XXXXXX");
+    snprintf(path, sizeof(path), "/tmp/vg-feed-log-XXXXXX");
     saved = log_start(path);
 
     for (i = 0; i < 3; i++) {
@@ -924,8 +925,8 @@ test_changes(void)
     assert(c.refused_full == 0);
     unlink(path);
 
-    ch = vg_ctrl_change(&c, 7);
-    assert(ch->kind == VG_CHANGE_UNBLOCK && ch->source == VG_SOURCE_SOCKET && ch->uid == 0);
+    ch = vg_ctrl_feed_entry(&c, 7);
+    assert(ch->kind == VG_FEED_UNBLOCK && ch->source == VG_SOURCE_SOCKET && ch->uid == 0);
     assert(strcmp(ch->cause, "unblock") == 0 && ch->id == 1);
     assert(memcmp(&ch->cidr, &p[0], sizeof(p[0])) == 0);
 
@@ -939,8 +940,8 @@ test_changes(void)
     assert(c.drop_count == 0 && c.seq == 10);
 
     for (s = 8; s <= 10; s++) {
-        ch = vg_ctrl_change(&c, s);
-        assert(ch->kind == VG_CHANGE_UNBLOCK && ch->source == VG_SOURCE_SELF);
+        ch = vg_ctrl_feed_entry(&c, s);
+        assert(ch->kind == VG_FEED_UNBLOCK && ch->source == VG_SOURCE_SELF);
         assert(strcmp(ch->cause, "expired") == 0);
     }
 
@@ -950,9 +951,9 @@ test_changes(void)
     cfg.local_cidr_count = 1;
     assert(vg_ctrl_prune_protected(&c) == 1);
     vg_ctrl_reloaded(&c);
-    assert(vg_ctrl_change(&c, 12)->kind == VG_CHANGE_UNBLOCK);
-    assert(strcmp(vg_ctrl_change(&c, 12)->cause, "reload") == 0);
-    assert(vg_ctrl_change(&c, 13)->kind == VG_CHANGE_RELOAD);
+    assert(vg_ctrl_feed_entry(&c, 12)->kind == VG_FEED_UNBLOCK);
+    assert(strcmp(vg_ctrl_feed_entry(&c, 12)->cause, "reload") == 0);
+    assert(vg_ctrl_feed_entry(&c, 13)->kind == VG_FEED_RELOAD);
     cfg.local_cidr_count = 0;
 
     assert(vg_ctrl_drop(&c, &p[4], VG_REASON_POLICY) == 0);
@@ -967,16 +968,16 @@ test_changes(void)
     assert(vg_ctrl_block_after(&c, 0) != NULL);
 
     assert(vg_ctrl_disarm(&c, "attack cleared") == 0);
-    ch = vg_ctrl_change(&c, 15);
-    assert(ch->kind == VG_CHANGE_DISARM && ch->source == VG_SOURCE_SELF);
+    ch = vg_ctrl_feed_entry(&c, 15);
+    assert(ch->kind == VG_FEED_DISARM && ch->source == VG_SOURCE_SELF);
     assert(strcmp(ch->cause, "attack-cleared") == 0);
-    assert(c.seq == 15 && vg_ctrl_change(&c, 16) == NULL);
+    assert(c.seq == 15 && vg_ctrl_feed_entry(&c, 16) == NULL);
 
     vg_ctrl_free(&c);
 }
 
 
-/* Only the last VG_CHANGES are kept; an older one is gone, and the epoch
+/* Only the last VG_FEED_SIZE are kept; an older one is gone, and the epoch
  * differs from another start's.
  */
 /*
@@ -984,12 +985,12 @@ test_changes(void)
  * that client's, source "ban", the arm's cause "ban".
  */
 static void
-test_changes_ban(void)
+test_feed_ban(void)
 {
-    struct vg_config         cfg;
-    struct vg_ctrl           c;
-    struct vg_cidr           p;
-    const struct vg_change  *ch;
+    struct vg_config             cfg;
+    struct vg_ctrl               c;
+    struct vg_cidr               p;
+    const struct vg_feed_entry  *ch;
 
     vg_config_defaults(&cfg);
     cfg.remote_map_size = 16;
@@ -1004,11 +1005,11 @@ test_changes_ban(void)
     assert(vg_ctrl_drop_ttl(&c, &p, 60) == 0);
     vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
 
-    ch = vg_ctrl_change(&c, 1);
-    assert(ch->kind == VG_CHANGE_ARM && ch->source == VG_SOURCE_BAN
+    ch = vg_ctrl_feed_entry(&c, 1);
+    assert(ch->kind == VG_FEED_ARM && ch->source == VG_SOURCE_BAN
            && ch->uid == 33 && strcmp(ch->cause, "ban") == 0);
-    ch = vg_ctrl_change(&c, 2);
-    assert(ch->kind == VG_CHANGE_BLOCK && ch->source == VG_SOURCE_BAN
+    ch = vg_ctrl_feed_entry(&c, 2);
+    assert(ch->kind == VG_FEED_BLOCK && ch->source == VG_SOURCE_BAN
            && ch->uid == 33 && ch->reason == VG_REASON_TIMED);
     assert(strcmp(vg_source_name(VG_SOURCE_BAN), "ban") == 0
            && strcmp(vg_source_name(VG_SOURCE_SOCKET), "socket") == 0
@@ -1019,7 +1020,7 @@ test_changes_ban(void)
 
 
 static void
-test_changes_wrap(void)
+test_feed_wrap(void)
 {
     struct vg_config  cfg;
     struct vg_ctrl    c, d;
@@ -1035,17 +1036,17 @@ test_changes_wrap(void)
     c.state = VG_ACTIVE;
     p = v4(198, 18, 13, 1, 32);
 
-    for (i = 0; i < VG_CHANGES / 2 + 10; i++) {
+    for (i = 0; i < VG_FEED_SIZE / 2 + 10; i++) {
         assert(vg_ctrl_drop(&c, &p, VG_REASON_MANUAL) == 0);
         assert(vg_ctrl_undrop(&c, &p) == 0);
     }
 
-    assert(c.seq == VG_CHANGES + 20);
-    assert(vg_ctrl_changes_oldest(&c) == 21);
-    assert(vg_ctrl_change(&c, 20) == NULL);
-    assert(vg_ctrl_change(&c, 21)->seq == 21);
-    assert(vg_ctrl_change(&c, c.seq)->kind == VG_CHANGE_UNBLOCK);
-    assert(vg_ctrl_change(&c, c.seq + 1) == NULL);
+    assert(c.seq == VG_FEED_SIZE + 20);
+    assert(vg_ctrl_feed_oldest(&c) == 21);
+    assert(vg_ctrl_feed_entry(&c, 20) == NULL);
+    assert(vg_ctrl_feed_entry(&c, 21)->seq == 21);
+    assert(vg_ctrl_feed_entry(&c, c.seq)->kind == VG_FEED_UNBLOCK);
+    assert(vg_ctrl_feed_entry(&c, c.seq + 1) == NULL);
 
     vg_ctrl_free(&c);
     vg_ctrl_free(&d);
@@ -1237,9 +1238,9 @@ main(void)
     test_drop_log_burst();
     test_drop_log_order();
     test_pool();
-    test_changes();
-    test_changes_wrap();
-    test_changes_ban();
+    test_feed();
+    test_feed_wrap();
+    test_feed_ban();
     test_blocks_pages();
     puts("control-plane regression tests passed");
 

@@ -20,21 +20,21 @@ enum vg_state { VG_IDLE = 0, VG_ACTIVE = 1 };
  */
 #define VG_LOG_CIDRS  8
 
-/* Changes kept for "changes since" (Seawall proposal 0012 §2): a reader
+/* Entries kept in the feed (Seawall proposal 0012 §2): a reader
  * whose cursor is older than these has a gap, and reads the blocks back.
  */
-#define VG_CHANGES  8192
+#define VG_FEED_SIZE  8192
 
 /* A blocks page holds at most this many. */
 #define VG_BLOCKS_PAGE  256
 
-enum vg_change_kind {
-    VG_CHANGE_BLOCK = 0,    /* a new block, or one re-dropped with a new
+enum vg_feed_kind {
+    VG_FEED_BLOCK = 0,      /* a new block, or one re-dropped with a new
                                reason or expiry */
-    VG_CHANGE_UNBLOCK,      /* one block lifted */
-    VG_CHANGE_ARM,
-    VG_CHANGE_DISARM,       /* every block lifted with it */
-    VG_CHANGE_RELOAD
+    VG_FEED_UNBLOCK,        /* one block lifted */
+    VG_FEED_ARM,
+    VG_FEED_DISARM,         /* every block lifted with it */
+    VG_FEED_RELOAD
 };
 
 /* Where a change came from: voidgate itself, a command on the control
@@ -49,7 +49,7 @@ enum vg_source {
 /* One change. A change made by a command on the control or ban socket is
  * that caller's (its source and uid); voidgate's own are "self".
  */
-struct vg_change {
+struct vg_feed_entry {
     uint64_t                seq;        /* 1, 2, ... since start; 0 unused */
     uint64_t                time_ms;    /* Unix time */
     uint64_t                id;         /* the block's, for block, unblock */
@@ -118,7 +118,7 @@ struct vg_ctrl {
     struct vg_drop_rec     *page_hint;      /* where the last page ended */
     uint64_t                epoch;          /* drawn at start, never 0 */
     uint64_t                seq;            /* the last change's */
-    struct vg_change       *changes;        /* VG_CHANGES, by seq */
+    struct vg_feed_entry   *feed;           /* VG_FEED_SIZE, by seq */
     int                     caller_source;  /* enum vg_source: whose
                                                command runs */
     uint32_t                caller_uid;
@@ -151,11 +151,11 @@ const char *vg_source_name(int source);
 void vg_ctrl_reloaded(struct vg_ctrl *c);
 
 /* The change with this seq, or NULL: not made yet, or no longer kept. */
-const struct vg_change *vg_ctrl_change(const struct vg_ctrl *c,
+const struct vg_feed_entry *vg_ctrl_feed_entry(const struct vg_ctrl *c,
     uint64_t seq);
 
 /* The oldest seq still kept; seq + 1 when there are none. */
-uint64_t vg_ctrl_changes_oldest(const struct vg_ctrl *c);
+uint64_t vg_ctrl_feed_oldest(const struct vg_ctrl *c);
 
 /* The first listed block whose id is past after, or NULL; then the next
  * one with vg_ctrl_block_next(). Ids grow along the list, oldest first.

@@ -533,7 +533,7 @@ with `-vv` on a test host, and use `bpftool prog show` and
 
 Control protocol: one newline-terminated command per connection (at most
 254 bytes), a text answer, then close. Answers start with `ok`, data, or
-`error:`. An answer is at most 8192 bytes; a page of `changes` or
+`error:`. An answer is at most 8192 bytes; a page of `feed` or
 `blocks`, 65536.
 
 Quick commands:

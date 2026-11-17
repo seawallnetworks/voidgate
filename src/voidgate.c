@@ -96,7 +96,7 @@ usage(const char *argv0)
             " [-R group] [-B group] [-v|-vv]\n"
             "  -g group  the control socket " VG_SOCK_PATH "'s group\n"
             "  -R group  also listen on " VG_MONITOR_SOCK_PATH ", read-only\n"
-            "            (status, stats, changes, blocks), for "
+            "            (status, stats, feed, blocks), for "
             "this group\n"
             "  -B group  also listen on " VG_BAN_SOCK_PATH ", for this "
             "group:\n"

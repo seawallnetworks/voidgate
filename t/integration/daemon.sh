@@ -140,7 +140,7 @@ start_daemon -c base.conf
 stop_daemon
 
 # -R: the read-only socket (Seawall proposal 0012 §2), for its group. It
-# answers status, stats, changes and blocks, and refuses the rest.
+# answers status, stats, feed and blocks, and refuses the rest.
 # Each change says whose it is: a socket caller's uid, or voidgate's own.
 # -r: the daemon's answers, not voidgatectl's tables.
 ro() { "$root/voidgatectl" -r -s /run/voidgate-monitor.sock "$@"; }
@@ -160,7 +160,7 @@ for command in arm disarm reload 'block 198.18.0.9/32' 'unblock 198.18.0.9/32'; 
 done
 [[ $(ro status | tail -1) == state=idle* ]]
 result=0
-ro changesx > ro.out || result=$?
+ro feedx > ro.out || result=$?
 [[ $result == 1 && $(< ro.out) == 'error: unknown command' ]]
 # the old names are gone
 for command in drops 'drop 198.18.0.9/32' 'undrop 198.18.0.9/32'; do
@@ -169,25 +169,25 @@ for command in drops 'drop 198.18.0.9/32' 'undrop 198.18.0.9/32'; do
     [[ $result == 1 && $(< ro.out) == 'error: unknown command' ]]
 done
 
-cursor=$(ro changes)
+cursor=$(ro feed)
 [[ $cursor =~ ^epoch=([0-9a-f]{16})\ seq=0\ oldest=1\ gap=0\ n=0\ more=0$ ]]
 epoch=${BASH_REMATCH[1]}
 # a block by uid 0 arms the gate: both its own; one by nobody, its uid
 [[ $("$root/voidgatectl" block 198.18.0.1/32) == ok ]]
 [[ $(as_nobody "$root/voidgatectl" block 198.18.0.2/32 ttl=60) == ok ]]
-ro changes "$epoch" 0 > changes.out
-mapfile -t lines < changes.out
+ro feed "$epoch" 0 > feed.out
+mapfile -t lines < feed.out
 [[ ${lines[0]} == "epoch=$epoch seq=3 oldest=1 gap=0 n=3 more=0" ]]
 [[ ${lines[1]} =~ ^seq=1\ time=[0-9]{13}\ kind=arm\ source=socket\ uid=0\ cause=manual-block$ ]]
 [[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=socket\ uid=0\ id=1\ cidr=198\.18\.0\.1/32\ reason=manual\ expires=0$ ]]
 [[ ${lines[3]} =~ ^seq=3\ time=[0-9]+\ kind=block\ source=socket\ uid=65534\ id=2\ cidr=198\.18\.0\.2/32\ reason=timed\ expires=[0-9]{10}$ ]]
 # nothing new; another epoch, or a cursor not reached yet, is a gap
-[[ $(ro changes "$epoch" 3) == "epoch=$epoch seq=3 oldest=1 gap=0 n=0 more=0" ]]
-[[ $(ro changes 0000000000000001 2) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
-[[ $(ro changes "$epoch" 9) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
+[[ $(ro feed "$epoch" 3) == "epoch=$epoch seq=3 oldest=1 gap=0 n=0 more=0" ]]
+[[ $(ro feed 0000000000000001 2) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
+[[ $(ro feed "$epoch" 9) == "epoch=$epoch seq=3 oldest=1 gap=1 n=0 more=0" ]]
 result=0
-ro changes "$epoch" > ro.out || result=$?
-[[ $result == 1 && $(< ro.out) == 'error: usage: changes <epoch> <seq>' ]]
+ro feed "$epoch" > ro.out || result=$?
+[[ $result == 1 && $(< ro.out) == 'error: usage: feed <epoch> <seq>' ]]
 
 ro blocks > blocks.out
 mapfile -t lines < blocks.out
@@ -217,8 +217,8 @@ next=${BASH_REMATCH[1]}
 [[ $("$root/voidgatectl" unblock 198.18.0.1/32) == ok ]]
 [[ $(as_nobody "$root/voidgatectl" disarm) == ok ]]
 [[ $("$root/voidgatectl" reload) == ok ]]
-ro changes "$epoch" 301 > changes.out
-mapfile -t lines < changes.out
+ro feed "$epoch" 301 > feed.out
+mapfile -t lines < feed.out
 [[ ${lines[0]} == "epoch=$epoch seq=304 oldest=1 gap=0 n=3 more=0" ]]
 [[ ${lines[1]} =~ kind=unblock\ source=socket\ uid=0\ cause=unblock\ id=1\ cidr=198\.18\.0\.1/32 ]]
 [[ ${lines[2]} =~ kind=disarm\ source=socket\ uid=65534\ cause=command$ ]]
@@ -232,7 +232,7 @@ stop_daemon
 # arms it, both changes the ban client's, source ban.
 start_daemon -c ro.conf -g root -R nogroup -B nogroup
 [[ $(stat -c '%a %U %G' /run/voidgate-ban.sock) == '660 root nogroup' ]]
-for command in status stats changes blocks arm disarm reload \
+for command in status stats feed blocks arm disarm reload \
     'block 198.18.0.9/32' 'block 198.18.0.9/32 ttl=0' \
     'block 198.18.0.9/32 ttl=60 x' 'unblock 198.18.0.9/32' \
     'block 198.18.0.0/24 ttl=60' 'block 0.0.0.0/1 ttl=60' \
@@ -244,10 +244,10 @@ for command in status stats changes blocks arm disarm reload \
 done
 [[ $(ro status | tail -1) == state=idle* ]]
 [[ $(as_nobody "$root/voidgatectl" -s /run/voidgate-ban.sock block 198.18.0.3/32 ttl=60) == ok ]]
-ro changes > ban.out
+ro feed > ban.out
 [[ $(< ban.out) =~ ^epoch=([0-9a-f]{16})\ seq=2 ]]
-ro changes "${BASH_REMATCH[1]}" 0 > changes.out
-mapfile -t lines < changes.out
+ro feed "${BASH_REMATCH[1]}" 0 > feed.out
+mapfile -t lines < feed.out
 [[ ${lines[1]} =~ ^seq=1\ time=[0-9]+\ kind=arm\ source=ban\ uid=65534\ cause=ban$ ]]
 [[ ${lines[2]} =~ ^seq=2\ time=[0-9]+\ kind=block\ source=ban\ uid=65534\ id=1\ cidr=198\.18\.0\.3/32\ reason=timed ]]
 grep -q 'armed (ban, ban uid 65534)' "$work/log/voidgate.log"
@@ -275,7 +275,7 @@ ip link del dum0
 
 # A restart draws another epoch.
 start_daemon -c base.conf -R nogroup
-[[ $(ro changes) =~ ^epoch=([0-9a-f]{16})\ seq=0 ]]
+[[ $(ro feed) =~ ^epoch=([0-9a-f]{16})\ seq=0 ]]
 [[ ${BASH_REMATCH[1]} != "$epoch" ]]
 stop_daemon
 # An unknown group stops the start, and leaves neither socket.
