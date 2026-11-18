@@ -391,7 +391,11 @@ attack_start(struct vg_ctrl *c)
 
     ch = feed_add(c, VG_FEED_ATTACK, NULL);
 
+    /* one start everywhere: the entry's time, status' attack_since and the
+     * end's start, which sw_logd matches (Seawall proposal 0017 §3)
+     */
     if (ch != NULL) {
+        c->attack.start_ms = ch->time_ms;
         ch->attack = c->attack;
     }
 

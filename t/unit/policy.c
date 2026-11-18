@@ -1094,6 +1094,8 @@ test_attacks(void)
     feed_kind(&c, c.seq - 1, VG_FEED_ARM);
     ch = feed_kind(&c, c.seq, VG_FEED_ATTACK);
     assert(ch->attack.id == 1 && ch->attack.start_ms >= t0);
+    assert(ch->time_ms == ch->attack.start_ms
+           && c.attack.start_ms == ch->time_ms);
     assert(ch->attack.pps > 4900 && ch->attack.pps < 5100);
 
     /* peaks are the highest tick; drops while open are counted */
