@@ -54,6 +54,9 @@ static struct vg_feed_entry *feed_add(struct vg_ctrl *c, int kind,
     const char *cause);
 static void feed_block(struct vg_ctrl *c, int kind, const char *cause,
     const struct vg_drop_rec *r, uint64_t id);
+static uint64_t now_ms(void);
+static void attack_start(struct vg_ctrl *c);
+static void attack_end(struct vg_ctrl *c, int how, uint64_t end_ms);
 
 
 static unsigned
@@ -349,6 +352,90 @@ vg_source_name(int source)
 }
 
 
+const char *
+vg_attack_how_name(int how)
+{
+    return how == VG_ATTACK_DISARM ? "disarm" : "quiet";
+}
+
+
+static uint64_t
+now_ms(void)
+{
+    struct timespec  ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    return (uint64_t) ts.tv_sec * 1000 + (uint64_t) ts.tv_nsec / 1000000;
+}
+
+
+/*
+ * An attack starts on this tick's rates (Seawall proposal 0017 §1): the
+ * gate is armed already, by the wake threshold or anything else. One at a
+ * time; an id from 1 after each start, the feed's epoch telling starts
+ * apart.
+ */
+static void
+attack_start(struct vg_ctrl *c)
+{
+    struct vg_feed_entry  *ch;
+
+    memset(&c->attack, 0, sizeof(c->attack));
+    c->attack.id = ++c->attack_ids;
+    c->attack.start_ms = now_ms();
+    c->attack.pps = (uint64_t) c->wake_rx_pps;
+    c->attack.bps = (uint64_t) c->wake_rx_bps;
+    c->attack_dropped = c->last_m.dropped;
+    c->attack_open = 1;
+
+    ch = feed_add(c, VG_FEED_ATTACK, NULL);
+
+    if (ch != NULL) {
+        ch->attack = c->attack;
+    }
+
+    sw_log_info("attack %llu started: %.0f pps, %.1f Mbps without the "
+                "host's own replies", (unsigned long long) c->attack.id,
+                c->wake_rx_pps, c->wake_rx_bps / 1e6);
+}
+
+
+/* The open attack ends: its summary to the feed, and kept for status. */
+static void
+attack_end(struct vg_ctrl *c, int how, uint64_t end_ms)
+{
+    struct vg_feed_entry  *ch;
+
+    if (!c->attack_open) {
+        return;
+    }
+
+    c->attack.end_ms = end_ms > c->attack.start_ms ? end_ms
+                                                   : c->attack.start_ms;
+    c->attack.how = (uint8_t) how;
+    c->attack.dropped = c->last_m.dropped >= c->attack_dropped
+                        ? c->last_m.dropped - c->attack_dropped : 0;
+    c->attack_open = 0;
+    c->last_attack = c->attack;
+    c->have_last_attack = 1;
+
+    ch = feed_add(c, VG_FEED_ATTACK_END, vg_attack_how_name(how));
+
+    if (ch != NULL) {
+        ch->attack = c->attack;
+    }
+
+    sw_log_info("attack %llu ended (%s) after %llu s: peak %llu pps, "
+                "%llu dropped, %u cut, %u bans",
+                (unsigned long long) c->attack.id, vg_attack_how_name(how),
+                (unsigned long long) (c->attack.end_ms - c->attack.start_ms)
+                / 1000, (unsigned long long) c->attack.pps,
+                (unsigned long long) c->attack.dropped, c->attack.cut,
+                c->attack.bans);
+}
+
+
 void
 vg_ctrl_reloaded(struct vg_ctrl *c)
 {
@@ -586,6 +673,18 @@ drop_add(struct vg_ctrl *c, const struct vg_cidr *p, uint32_t reason,
         c->drop_count++;
         feed_block(c, VG_FEED_BLOCK, NULL, r, r->id);
 
+        /* an operator's blocks are theirs, recorded as blocks */
+        if (c->attack_open) {
+            if (c->caller_source == VG_SOURCE_BAN) {
+                c->attack.bans++;
+
+            } else if (reason == VG_REASON_POLICY
+                       || reason == VG_REASON_AGGREGATE)
+            {
+                c->attack.cut++;
+            }
+        }
+
     } else {
 
         if (reason == VG_REASON_TIMED) {
@@ -764,6 +863,9 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
 
     vg_drop_flush(c->maps);
     drops_reset(c);
+
+    /* the attack, if one is open, ends with the gate: now */
+    attack_end(c, VG_ATTACK_DISARM, now_ms());
 
     c->state = VG_IDLE;
     c->quiet_since = 0;
@@ -1164,7 +1266,9 @@ vg_ctrl_tick(struct vg_ctrl *c)
         if (c->wake_rx_pps > (double) c->cfg->wake_pps
             || c->wake_rx_bps > (double) c->cfg->wake_mbps * 1000000.0)
         {
-            vg_ctrl_arm(c, "wake threshold");
+            if (vg_ctrl_arm(c, "wake threshold") == 0) {
+                attack_start(c);
+            }
         }
 
         return 0;
@@ -1178,11 +1282,30 @@ vg_ctrl_tick(struct vg_ctrl *c)
                  "active", c->rx_pps, c->rx_bps / 1e6, c->wake_rx_pps,
                  drop_pps, c->drop_count);
 
+    if (c->attack_open) {
+        if ((uint64_t) c->wake_rx_pps > c->attack.pps) {
+            c->attack.pps = (uint64_t) c->wake_rx_pps;
+        }
+
+        if ((uint64_t) c->wake_rx_bps > c->attack.bps) {
+            c->attack.bps = (uint64_t) c->wake_rx_bps;
+        }
+    }
+
     if (c->wake_rx_pps < (double) c->cfg->wake_pps
         && c->wake_rx_bps < (double) c->cfg->wake_mbps * 1000000.0)
     {
         if (c->quiet_since == 0) {
             c->quiet_since = time(NULL);
+        }
+
+        /* the attack ended when traffic fell, before the disarm, which
+         * may come on this tick too (Seawall proposal 0017 §1)
+         */
+        if (c->attack_open
+            && time(NULL) - c->quiet_since >= c->cfg->clear_seconds)
+        {
+            attack_end(c, VG_ATTACK_QUIET, (uint64_t) c->quiet_since * 1000);
         }
 
         if (c->drop_count == 0
@@ -1193,6 +1316,16 @@ vg_ctrl_tick(struct vg_ctrl *c)
 
     } else {
         c->quiet_since = 0;
+
+        /* over the threshold on a gate armed already: an attack too, on
+         * the test that wakes an idle one
+         */
+        if (!c->attack_open
+            && (c->wake_rx_pps > (double) c->cfg->wake_pps
+                || c->wake_rx_bps > (double) c->cfg->wake_mbps * 1000000.0))
+        {
+            attack_start(c);
+        }
     }
 
     return 0;

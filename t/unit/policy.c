@@ -30,6 +30,7 @@ static void test_feed(void);
 static void test_feed_wrap(void);
 static void test_feed_ban(void);
 static void test_wake_replies(void);
+static void test_attacks(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
 static int log_count(const char *path, const char *needle);
@@ -1043,6 +1044,134 @@ test_wake_replies(void)
 }
 
 
+/* The feed's entry seq, which must be of this kind. */
+static const struct vg_feed_entry *
+feed_kind(struct vg_ctrl *c, uint64_t seq, int kind)
+{
+    const struct vg_feed_entry  *ch = vg_ctrl_feed_entry(c, seq);
+
+    assert(ch != NULL && ch->kind == kind);
+
+    return ch;
+}
+
+
+/*
+ * Attacks (Seawall proposal 0017 §1, §2): one starts on the tick over
+ * wake_*, armed or not; ends after clear_seconds below both, its end when
+ * traffic fell, before a disarm on the same tick; or with a disarm, at its
+ * time. Its summary: peaks, dropped, cut (policy, aggregate), bans.
+ */
+static void
+test_attacks(void)
+{
+    struct vg_config             cfg;
+    struct vg_ctrl               c;
+    struct vg_cidr               p, q, m;
+    const struct vg_feed_entry  *ch;
+    uint64_t                     t0;
+    time_t                       quiet;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.wake_pps = 2000;
+    cfg.wake_mbps = 1000;
+    cfg.clear_seconds = 0;
+    nitems = 0;
+    complete_scan = 1;
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+    assert(vg_ctrl_init(&c, &cfg, NULL, NULL, NULL) == 0);
+    c.last_m = stub_metrics;
+
+    /* below the threshold: nothing */
+    wake_tick(&c, 1000, 0);
+    assert(c.state == VG_IDLE && !c.attack_open && c.seq == 0);
+
+    /* a flood on an idle gate: it arms, and an attack starts after */
+    t0 = (uint64_t) time(NULL) * 1000;
+    wake_tick(&c, 5000, 0);
+    assert(c.state == VG_ACTIVE && c.attack_open && c.attack.id == 1);
+    feed_kind(&c, c.seq - 1, VG_FEED_ARM);
+    ch = feed_kind(&c, c.seq, VG_FEED_ATTACK);
+    assert(ch->attack.id == 1 && ch->attack.start_ms >= t0);
+    assert(ch->attack.pps > 4900 && ch->attack.pps < 5100);
+
+    /* peaks are the highest tick; drops while open are counted */
+    stub_metrics.dropped += 100;
+    wake_tick(&c, 8000, 0);
+    stub_metrics.dropped += 50;
+    wake_tick(&c, 6000, 0);
+    assert(c.attack.pps > 7900 && c.attack.pps < 8100);
+
+    /* cut: policy and aggregate; bans: the ban socket's; manual: neither */
+    assert(vg_parse_cidr("198.18.0.1/32", &p) == 0);
+    assert(vg_parse_cidr("198.18.0.2/32", &q) == 0);
+    assert(vg_parse_cidr("198.18.1.0/24", &m) == 0);
+    assert(vg_ctrl_drop(&c, &p, VG_REASON_POLICY) == 0);
+    vg_ctrl_caller(&c, VG_SOURCE_BAN, 1000);
+    assert(vg_ctrl_drop_ttl(&c, &q, 60) == 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SOCKET, 0);
+    assert(vg_ctrl_drop(&c, &m, VG_REASON_MANUAL) == 0);
+    vg_ctrl_caller(&c, VG_SOURCE_SELF, 0);
+    assert(c.attack.cut == 1 && c.attack.bans == 1);
+
+    /* a reload doesn't end it */
+    vg_ctrl_reloaded(&c);
+    assert(c.attack_open);
+
+    /* quiet for clear_seconds (0 here): it ends when traffic fell; the
+     * blocks keep the gate armed
+     */
+    quiet = time(NULL);
+    wake_tick(&c, 100, 0);
+    assert(!c.attack_open && c.state == VG_ACTIVE);
+    ch = feed_kind(&c, c.seq, VG_FEED_ATTACK_END);
+    assert(ch->attack.id == 1 && ch->attack.how == VG_ATTACK_QUIET);
+    /* to the second, never before its start, which has ms */
+    assert(ch->attack.end_ms >= (uint64_t) quiet * 1000
+           && ch->attack.end_ms < ((uint64_t) time(NULL) + 1) * 1000
+           && ch->attack.end_ms >= ch->attack.start_ms);
+    assert(ch->attack.pps > 7900 && ch->attack.dropped == 150);
+    assert(ch->attack.cut == 1 && ch->attack.bans == 1);
+    assert(strcmp(ch->cause, "quiet") == 0);
+    assert(c.have_last_attack && c.last_attack.id == 1);
+
+    /* a flood on a gate armed by its blocks: an attack, no arm */
+    wake_tick(&c, 5000, 0);
+    assert(c.attack_open && c.attack.id == 2);
+    feed_kind(&c, c.seq, VG_FEED_ATTACK);
+    feed_kind(&c, c.seq - 1, VG_FEED_ATTACK_END);
+
+    /* a disarm ends it, at the disarm's time, before its own entry */
+    t0 = (uint64_t) time(NULL) * 1000;
+    assert(vg_ctrl_disarm(&c, "command") == 0);
+    assert(!c.attack_open && c.state == VG_IDLE);
+    ch = feed_kind(&c, c.seq - 1, VG_FEED_ATTACK_END);
+    assert(ch->attack.id == 2 && ch->attack.how == VG_ATTACK_DISARM);
+    assert(ch->attack.end_ms >= t0);
+    feed_kind(&c, c.seq, VG_FEED_DISARM);
+    assert(c.last_attack.id == 2);
+
+    /* no blocks: the attack's end and the automatic disarm fall on one
+     * tick, the end first
+     */
+    wake_tick(&c, 5000, 0);
+    assert(c.attack_open && c.attack.id == 3 && c.drop_count == 0);
+    wake_tick(&c, 100, 0);
+    assert(!c.attack_open && c.state == VG_IDLE);
+    ch = feed_kind(&c, c.seq - 1, VG_FEED_ATTACK_END);
+    assert(ch->attack.id == 3 && ch->attack.how == VG_ATTACK_QUIET);
+    feed_kind(&c, c.seq, VG_FEED_DISARM);
+
+    /* the host's own replies start none */
+    wake_tick(&c, 5000, 4900);
+    assert(c.state == VG_IDLE && !c.attack_open);
+
+    vg_ctrl_free(&c);
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+}
+
+
 /* Only the last VG_FEED_SIZE are kept; an older one is gone, and the epoch
  * differs from another start's.
  */
@@ -1308,6 +1437,7 @@ main(void)
     test_feed_wrap();
     test_feed_ban();
     test_wake_replies();
+    test_attacks();
     test_blocks_pages();
     puts("control-plane regression tests passed");
 

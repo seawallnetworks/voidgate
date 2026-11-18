@@ -34,7 +34,37 @@ enum vg_feed_kind {
     VG_FEED_UNBLOCK,        /* one block lifted */
     VG_FEED_ARM,
     VG_FEED_DISARM,         /* every block lifted with it */
-    VG_FEED_RELOAD
+    VG_FEED_RELOAD,
+    VG_FEED_ATTACK,         /* an attack started (Seawall proposal 0017) */
+    VG_FEED_ATTACK_END      /* and ended, with its summary */
+};
+
+/* How an attack ended (Seawall proposal 0017 §1). */
+enum vg_attack_how {
+    VG_ATTACK_QUIET = 0,    /* rx, less replies, below both wake_* for
+                               clear_seconds; end is when it fell */
+    VG_ATTACK_DISARM        /* the gate disarmed with it open: a command,
+                               or shutdown; end is the disarm's time */
+};
+
+/*
+ * One attack: from the first tick over wake_*, armed or not, to
+ * clear_seconds below both, or a disarm. Rates are rx less the replies to
+ * the host's own flows, as wake_* see them (wake_rx_*).
+ */
+struct vg_attack {
+    uint64_t                id;         /* 1, 2, ... since start */
+    uint64_t                start_ms;   /* Unix time */
+    uint64_t                end_ms;     /* 0 while open */
+    uint64_t                pps;        /* the start's tick, in an attack
+                                           entry; the highest tick so far,
+                                           or of it, otherwise */
+    uint64_t                bps;
+    uint64_t                dropped;    /* all dropped while open */
+    uint32_t                cut;        /* policy and aggregate blocks
+                                           added while open */
+    uint32_t                bans;       /* ban socket blocks added */
+    uint8_t                 how;        /* enum vg_attack_how, ended */
 };
 
 /* Where a change came from: voidgate itself, a command on the control
@@ -52,10 +82,15 @@ enum vg_source {
 struct vg_feed_entry {
     uint64_t                seq;        /* 1, 2, ... since start; 0 unused */
     uint64_t                time_ms;    /* Unix time */
-    uint64_t                id;         /* the block's, for block, unblock */
-    time_t                  expires;    /* a timed block's lift time */
-    struct vg_cidr          cidr;
-    uint32_t                reason;
+    union {
+        struct {                        /* block, unblock */
+            uint64_t        id;
+            time_t          expires;    /* a timed block's lift time */
+            struct vg_cidr  cidr;
+            uint32_t        reason;
+        };
+        struct vg_attack    attack;     /* attack, attack-end */
+    };
     uint32_t                uid;
     uint8_t                 kind;
     uint8_t                 source;     /* enum vg_source */
@@ -126,6 +161,13 @@ struct vg_ctrl {
     int                     caller_source;  /* enum vg_source: whose
                                                command runs */
     uint32_t                caller_uid;
+    int                     attack_open;
+    struct vg_attack        attack;         /* the open one, peaks so far */
+    uint64_t                attack_dropped; /* metrics' dropped at its start */
+    uint64_t                attack_ids;     /* the last id handed out */
+    int                     have_last_attack;
+    struct vg_attack        last_attack;    /* the last ended; a restart
+                                               forgets it */
 };
 
 
@@ -150,6 +192,9 @@ void vg_ctrl_caller(struct vg_ctrl *c, int source, uint32_t uid);
 
 /* "self", "socket" or "ban" */
 const char *vg_source_name(int source);
+
+/* "quiet" or "disarm" */
+const char *vg_attack_how_name(int how);
 
 /* Record a reload that went through (the caller's, if a command's). */
 void vg_ctrl_reloaded(struct vg_ctrl *c);

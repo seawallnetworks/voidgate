@@ -62,6 +62,7 @@ static void ctl_reload(struct vg_ctrl *ctrl, const char *args,
 static void ctl_feed(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int feed_line(const struct vg_feed_entry *ch, char *out, size_t size);
+static int status_attacks(struct vg_ctrl *ctrl, char *out, size_t size);
 static void ctl_blocks(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int parse_u64(const char *s, int base, uint64_t *out);
@@ -145,16 +146,64 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
 
     n = ctl_critical(ctrl, reply, reply_size);
 
-    snprintf(reply + n, reply_size - n,
+    n += snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
              "wake_rx_pps=%.0f wake_rx_bps=%.0f "
-             "blocked=%d degraded=%d iface=%s hook=%s flows=%s\n",
+             "blocked=%d degraded=%d iface=%s hook=%s flows=%s",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
              ctrl->wake_rx_pps, ctrl->wake_rx_bps,
              ctrl->drop_count, ctrl->maps->degraded,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
              ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
+
+    /* the words of Seawall proposal 0017 §2, on the same line */
+    if (n > 0 && (size_t) n < reply_size) {
+        (void) status_attacks(ctrl, reply + n, reply_size - (size_t) n);
+    }
+}
+
+
+/*
+ * " attack=0|1", with 1 the open attack's id, start and peaks so far; and
+ * the last ended attack's record under last_attack_, once there is one.
+ * Ends the line.
+ */
+static int
+status_attacks(struct vg_ctrl *ctrl, char *out, size_t size)
+{
+    int                      w;
+    const struct vg_attack  *a = &ctrl->attack, *l = &ctrl->last_attack;
+
+    w = snprintf(out, size, " attack=%d", ctrl->attack_open);
+
+    if (ctrl->attack_open && w > 0 && (size_t) w < size) {
+        w += snprintf(out + w, size - (size_t) w,
+                      " attack_id=%" PRIu64 " attack_since=%" PRIu64
+                      " attack_tick_peak_pps=%" PRIu64
+                      " attack_tick_peak_bps=%" PRIu64,
+                      a->id, a->start_ms, a->pps, a->bps);
+    }
+
+    if (ctrl->have_last_attack && w > 0 && (size_t) w < size) {
+        w += snprintf(out + w, size - (size_t) w,
+                      " last_attack_id=%" PRIu64 " last_attack_start=%" PRIu64
+                      " last_attack_end=%" PRIu64 " last_attack_how=%s"
+                      " last_attack_tick_peak_pps=%" PRIu64
+                      " last_attack_tick_peak_bps=%" PRIu64
+                      " last_attack_dropped=%" PRIu64
+                      " last_attack_cut=%u last_attack_bans=%u",
+                      l->id, l->start_ms, l->end_ms,
+                      vg_attack_how_name(l->how), l->pps, l->bps,
+                      l->dropped, l->cut, l->bans);
+    }
+
+    if (w > 0 && (size_t) w + 1 < size) {
+        out[w++] = '\n';
+        out[w] = '\0';
+    }
+
+    return w;
 }
 
 
@@ -393,9 +442,13 @@ ctl_reload(struct vg_ctrl *ctrl, const char *args, char *reply,
  * and carries on from the seq in this reply.
  *
  *   epoch=<16 hex> seq=<last> oldest=<seq> gap=0|1 n=<lines> more=0|1
- *   seq=N time=<Unix ms> kind=block|unblock|arm|disarm|reload
- *       source=self|socket [uid=N] [cause=W] [id=N cidr=C reason=R
- *       expires=<Unix s, 0 if none>]
+ *   seq=N time=<Unix ms> kind=block|unblock|arm|disarm|reload|attack|
+ *       attack-end source=self|socket [uid=N] [cause=W] [id=N cidr=C
+ *       reason=R expires=<Unix s, 0 if none>]
+ *   attack (Seawall proposal 0017 §2): id=N wake_rx_pps=R wake_rx_bps=R,
+ *       the rates that started it; attack-end: id=N start=<ms> end=<ms>
+ *       how=quiet|disarm tick_peak_pps=R tick_peak_bps=R dropped=N cut=N
+ *       bans=N
  */
 static void
 ctl_feed(struct vg_ctrl *ctrl, const char *args, char *reply,
@@ -493,7 +546,7 @@ static int
 feed_line(const struct vg_feed_entry *ch, char *out, size_t size)
 {
     static const char  *kinds[] = {
-        "block", "unblock", "arm", "disarm", "reload"
+        "block", "unblock", "arm", "disarm", "reload", "attack", "attack-end"
     };
 
     int   w, n;
@@ -522,6 +575,24 @@ feed_line(const struct vg_feed_entry *ch, char *out, size_t size)
                      " id=%" PRIu64 " cidr=%s reason=%s expires=%lld",
                      ch->id, cidr, vg_reason_name(ch->reason),
                      (long long) ch->expires);
+        w += n;
+
+    } else if (ch->kind == VG_FEED_ATTACK) {
+        n = snprintf(out + w, size - (size_t) w,
+                     " id=%" PRIu64 " wake_rx_pps=%" PRIu64
+                     " wake_rx_bps=%" PRIu64,
+                     ch->attack.id, ch->attack.pps, ch->attack.bps);
+        w += n;
+
+    } else if (ch->kind == VG_FEED_ATTACK_END) {
+        n = snprintf(out + w, size - (size_t) w,
+                     " id=%" PRIu64 " start=%" PRIu64 " end=%" PRIu64
+                     " how=%s tick_peak_pps=%" PRIu64 " tick_peak_bps=%"
+                     PRIu64 " dropped=%" PRIu64 " cut=%u bans=%u",
+                     ch->attack.id, ch->attack.start_ms, ch->attack.end_ms,
+                     vg_attack_how_name(ch->attack.how), ch->attack.pps,
+                     ch->attack.bps, ch->attack.dropped, ch->attack.cut,
+                     ch->attack.bans);
         w += n;
     }
 

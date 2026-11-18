@@ -161,8 +161,9 @@ of them.
 voidgatectl -s /run/voidgate-monitor.sock feed
 ```
 
-- `feed` gives the cursor; `feed <epoch> <seq>` every change after it,
-  oldest first: blocks added and lifted, arm, disarm and reload.
+- `feed` gives the cursor; `feed <epoch> <seq>` every entry after it,
+  oldest first: blocks added and lifted, arm, disarm and reload, and
+  attacks started and ended (below).
 
   ```
   epoch=9f2c41d07a6be3e1 seq=3 oldest=1 gap=0 n=2 more=0
@@ -182,6 +183,30 @@ voidgatectl -s /run/voidgate-monitor.sock feed
   another epoch, older than the last 8192 entries, or not reached yet,
   is a gap (`gap=1`, no entries): read the blocks back, and carry on from
   that reply's seq.
+- **Attacks** (Seawall proposal 0017). One starts on the first tick when
+  received traffic less the host's own replies (`wake_rx_pps`,
+  `wake_rx_bps`) exceeds `wake_pps` or `wake_mbps`, whether the gate is
+  idle (it arms first) or armed already. It ends when that traffic has
+  stayed below both for `clear_seconds` (`how=quiet`, its `end` when
+  traffic fell, to the second), before an automatic disarm on the same
+  tick; or with a disarm, a command or shutdown (`how=disarm`, its `end`
+  the disarm's time). A reload doesn't end it. One at a time, numbered
+  from 1 after each start; a restart forgets an open one.
+
+  ```
+  seq=7 time=1763150000123 kind=attack source=self id=1 wake_rx_pps=25268 wake_rx_bps=21427032
+  seq=12 time=1763150004378 kind=attack-end source=self cause=quiet id=1 start=1763150000123 end=1763150002000 how=quiet tick_peak_pps=27575 tick_peak_bps=23383708 dropped=83898 cut=1 bans=0
+  ```
+
+  `wake_rx_*`, the rates that started it; `tick_peak_*`, the highest
+  tick's; `dropped`, every packet dropped while it was open, a permanent
+  manual block's too; `cut`, the policy and aggregate blocks added;
+  `bans`, the ban socket's. Times are Unix ms. `status` says `attack=1`
+  with `attack_id`, `attack_since` and `attack_tick_peak_pps` and `_bps`
+  so far, and keeps the last ended attack's record under `last_attack_`
+  (`last_attack_id`, `_start`, `_end`, `_how`, `_tick_peak_pps`,
+  `_tick_peak_bps`, `_dropped`, `_cut`, `_bans`) until the next one ends.
+  `voidgatectl status`'s table shows `attack` alone; `-r status` has all.
 - `blocks`, then `blocks after <next>` until `next=end`: every listed
   block, 256 a page, oldest first by id (ids only grow). `voidgatectl
   blocks` reads every page and prints one table; `voidgatectl -r blocks`
