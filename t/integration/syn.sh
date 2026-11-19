@@ -118,6 +118,13 @@ PY
 word() { tr ' ' '\n' <<< "$2" | sed -n "s/^$1=//p"; }
 
 syn_state() { word syn_guard "$("$CTL" -r status)"; }
+
+# every entry of the feed, oldest first
+feed_all() {
+    local epoch
+    epoch=$("$CTL" -r feed | sed -n 's/^epoch=\([0-9a-f]*\) .*/\1/p')
+    "$CTL" -r feed "$epoch" 0 | tail -n +2
+}
 counter() { word "$1" "$("$CTL" -r stats)"; }
 
 fail() {
@@ -165,6 +172,11 @@ for _ in $(seq 25); do
     sleep 0.1
 done
 (( $(counter syn_guard_dropped) > dropped )) || fail "expected first SYNs dropped"
+feed_all \
+    | grep -q ' kind=syn-engage source=self attack=1 syn_unproven_pps=[1-9]' \
+    || fail "expected syn-engage in attack 1 on the feed"
+[[ $(feed_all | grep -c ' kind=syn-engage ') == 1 ]] \
+    || fail "expected one syn-engage: it went back and forth"
 echo "engaged: $("$CTL" -r stats)"
 
 # 3. the SYN flood over, standby after clear_seconds, the gate still armed
@@ -177,6 +189,9 @@ STATUS=$("$CTL" -r status)
     || fail "expected standby after clear_seconds"
 [[ $(word state "$STATUS") == active ]] \
     || fail "expected the gate still armed by the UDP flood"
+feed_all | tail -1 \
+    | grep -q ' kind=syn-standby source=self cause=quiet attack=1 ' \
+    || fail "expected syn-standby in attack 1 on the feed"
 wait "${FLOODS[@]}"
 FLOODS=()
 
@@ -192,6 +207,10 @@ kill -CONT "$DAEMON_PID"
 sleep 0.3
 (( $(counter syn_guard_unready) > unready + 500 )) \
     || fail "expected SYNs passed unfiltered while userspace was stopped"
+sleep 0.3
+"$CTL" -r status \
+    | grep -q '^WARNING: syn_guard: [0-9]* SYNs passed unfiltered' \
+    || fail "expected status to warn of SYNs passed unfiltered"
 echo "after the stop: $("$CTL" -r stats)"
 wait "${FLOODS[@]}"
 FLOODS=()

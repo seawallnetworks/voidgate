@@ -173,6 +173,9 @@ its comments.
 | `remote_map_size` | `262144` | Cap on tracked sources (LRU, not preallocated). | restart |
 | `drop_map_size` | `65536` | Cap on drop-tree prefixes (not preallocated). | restart |
 | `reply_idle_seconds` | `120` | A flow that has not left for longer is no reply: its packets are judged as any other's. A TCP flow the host closed is one for 120 s after its FIN, 10 s after its RST, at most. | reload |
+| `syn_guard` | `yes` | First-SYN drop may engage in a SYN flood (below). `no`: never, and pure SYNs are counted against their source. | restart |
+| `syn_guard_bits` | `25` | First-SYN drop's filter: bits a generation as a power of two, 23 to 28; six generations, 24 MB at 25. | restart |
+| `syn_guard_proven_rate` | `20` | SYNs a second a proven address passes unchecked, once voidgate knows which addresses are proven. | reload |
 | `metrics_port` | `9105` | Prometheus on `127.0.0.1`; `0` disables it. | restart |
 
 The built-in allow list is
@@ -200,6 +203,36 @@ Tuning rules:
   it if `voidgate_map_full_total` grows.
 - Example: a 1 Gbit/s VM that normally takes 40 Mbit/s might set
   `wake_mbps = 120` and `threshold_mbps = 20`.
+
+**First-SYN drop** (Seawall proposal 0023) answers a SYN flood from
+spoofed sources, which can't usefully be blocked by source, without the
+kernel sending a SYN-ACK to each SYN, as syncookies do: on a cloud host
+those replies are billed egress. Armed, while SYNs from unproven
+addresses alone exceed `wake_pps` on a tick (`syn_unproven`), it engages:
+a SYN not seen in the last 0.9 to 3.6 s is dropped and remembered, and
+the same SYN again (a real client retransmits it after about 1 s,
+Windows after 3 s) goes on to the checks after it, the drop list's
+included. Spoofed sources don't retransmit. It goes back to standby
+after `clear_seconds` below `wake_pps`, or with a disarm; `voidgatectl
+status` says `syn_guard=engaged`, `standby` or `off`, and the feed has
+`syn-engage` and `syn-standby`. What it costs:
+
+- A new client's first connection waits about a second during the
+  flood. Until voidgate reads which addresses the host has sent data to
+  from sw_flowd, every client is new, returning ones too.
+- A client that gives up on a connection in under a second can't
+  connect during the flood: each retry is a new SYN. Short-timeout RPC
+  dialers, monitoring probes and some health checkers belong in
+  `allow_networks`. A load balancer's TCP health checks wait a second
+  each, within their usual timeouts.
+- `allow_ports` is not exempt: SSH waits once too.
+- The filter is empty after a restart: a restart during a flood drops
+  every new SYN once more.
+- A SYN flood under `wake_pps` is left to the kernel's syncookies.
+- TCP Fast Open clients connecting during the flood go without it for a
+  while; their connections are fine.
+- 24 MB of memory at `syn_guard_bits = 25`, resident whether engaged or
+  not.
 
 A reload with a bad value logs `<file>:<line>: bad value for <key>`,
 answers `error: reload failed` and keeps the running config. An unknown
@@ -271,8 +304,8 @@ active      1        1         0   eth0  xdp-native  sw_flowd
 
 | Command | Effect | Typical answer |
 | --- | --- | --- |
-| `status` | The gate's state: rates, `blocked`, the hook; `attack=1` while an attack is open, with its id, start and peaks, and the last ended one's record under `last_attack_` (README, "Attacks"); `flows` is `sw_flowd` while its table is read, `none` without it, when a first line `CRITICAL: …` says so, until voidgate restarts with it. `voidgatectl status` prints it as a table without the rates, which `stats` shows | `-r status`: `state=idle armed=0 rx_pps=… rx_bps=… wake_rx_pps=… wake_rx_bps=… blocked=0 degraded=0 iface=eth0 hook=xdp-native flows=sw_flowd` |
-| `stats [<interval> [<count>]]` | The data path's counters. `voidgatectl stats` reads `status` too and prints both as one row, `status`'s `CRITICAL` line first; a key the daemon doesn't give shows `-`. With an interval, a row every `<interval>` seconds, as `mpstat` | see below; `-r stats`, the counters alone: `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=… rx_reply_pkts=… rx_reply_bytes=…` |
+| `status` | The gate's state: rates, `blocked`, the hook; `attack=1` while an attack is open, with its id, start and peaks, and the last ended one's record under `last_attack_` (README, "Attacks"); `flows` is `sw_flowd` while its table is read, `none` without it, when a first line `CRITICAL: …` says so, until voidgate restarts with it; `syn_guard` is first-SYN drop's state, `engaged`, `standby` or `off`, with `syn_guard_fp_est`, the share of spoofed SYNs estimated to pass as retransmissions while engaged, and `WARNING: syn_guard: …` lines before the state when SYNs passed unfiltered in the last minute or that share is over 1%. `voidgatectl status` prints it as a table without the rates, which `stats` shows, and the `attack_` and `syn_guard_` details | `-r status`: `state=idle armed=0 rx_pps=… rx_bps=… wake_rx_pps=… wake_rx_bps=… blocked=0 degraded=0 iface=eth0 hook=xdp-native flows=sw_flowd syn_guard=standby syn_guard_fp_est=0.000000` |
+| `stats [<interval> [<count>]]` | The data path's counters. `voidgatectl stats` reads `status` too and prints both as one row, `status`'s `CRITICAL` line first; a key the daemon doesn't give shows `-`. With an interval, a row every `<interval>` seconds, as `mpstat` | see below; `-r stats`, the counters alone: `rx_pkts=… rx_bytes=… passed=… dropped=… non_ip=… map_full=… parse_err=… reply_passed=… rx_reply_pkts=… rx_reply_bytes=… syn_unproven=… syn_guard_dropped=… syn_guard_retrans=… syn_guard_unready=…` |
 | `blocks [after <id>]` | What is blocked now, 256 a page, oldest first. `voidgatectl blocks` reads every page and prints a table, `(none)` when empty; its `expires` is a timed block's lift time, `never` for a manual one, `ban_time` for policy and aggregate ones (`ban_time` seconds after `since`) | `-r blocks`: `epoch=… seq=N n=K next=<id>\|end`, then `id=N cidr=C reason=R inserted=<s> expires=<s>` |
 | `arm` | Arm now; re-baselines source rates | `ok` |
 | `disarm` | Lift every block, back to IDLE | `ok` |
@@ -290,7 +323,8 @@ so re-apply permanent blocks after a restart.
 Daily checks:
 
 1. `voidgatectl status`: expect `state` idle, `degraded` 0, the right
-   `iface`, `flows` sw_flowd, and no `CRITICAL` line.
+   `iface`, `flows` sw_flowd, `syn_guard` standby (or `off` if you set
+   it so), and no `CRITICAL` or `WARNING` line.
 2. `voidgatectl blocks`: review the `manual` blocks; they never
    expire.
 3. `voidgatectl stats`: no `map_full=` or `parse_err=` after the row,
@@ -304,7 +338,12 @@ is `dropped` out of `rx_pkts`. `blocked` is how many addresses and ranges
 are blocked now; `voidgatectl blocks` lists them. The errors,
 `map_full` and `parse_err`, follow the row when not 0; `non_ip`,
 `reply_passed`, `rx_reply_pkts` and `rx_reply_bytes`, normal traffic, are
-only in `-r stats`, which has every digit. `status`'s `wake_rx_pps` and
+only in `-r stats`, which has every digit. So are first-SYN drop's:
+`syn_unproven`, armed, SYNs from unproven addresses, before its filter
+(what engages it); `syn_guard_dropped`, first SYNs it dropped, not in
+`dropped`, the drop list's; `syn_guard_retrans`, SYNs it found again,
+passed on; `syn_guard_unready`, SYNs passed unfiltered while its next
+generation wasn't cleared in time. `status`'s `wake_rx_pps` and
 `wake_rx_bps` are the rates the wake thresholds compare, rx less the
 replies to the host's own flows:
 
@@ -350,6 +389,12 @@ Prometheus, when `metrics_port` is positive, is
 | `voidgate_flow_table_attached` | gauge | 0: sw_flowd wasn't running when voidgate started |
 | `voidgate_flow_table_entries`, `voidgate_flow_table_size` | gauge | entries near size: raise sw_flowd's `table_size` |
 | `voidgate_flow_table_evicted_total` | counter | sustained increase: the table is too small |
+| `voidgate_syn_guard_enabled` | gauge | 0 with `syn_guard = yes`: its filter couldn't be set up |
+| `voidgate_syn_guard_engaged` | gauge | trend: 1 during a SYN flood over `wake_pps` |
+| `voidgate_syn_unproven_total` | counter | trend: SYNs from unproven addresses, armed |
+| `voidgate_syn_guard_dropped_total`, `voidgate_syn_guard_retrans_total` | counter | trend: first SYNs dropped, and found again |
+| `voidgate_syn_guard_unready_total` | counter | any increase: SYNs passed unfiltered, the thread clearing the filter late |
+| `voidgate_syn_guard_fp_est` | gauge | over 0.01: raise `syn_guard_bits` |
 
 The listener binds only `127.0.0.1`; scrape it with a local agent or node
 exporter textfile, not across the network.
@@ -468,6 +513,7 @@ restart.
 | Unit and verdict tests, all hooks | `make test` | root, BPF |
 | Daemon startup and logging | `sudo t/integration/daemon.sh` | root; runs in private namespaces |
 | Network-namespace end to end | `sudo t/integration/netns.sh` | root; private namespaces |
+| First-SYN drop under floods | `sudo t/integration/syn.sh` | root; private namespaces |
 | Sharing the hook with other programs | `sudo t/integration/coexist.sh` | root |
 | OpenResty client | `sudo t/integration/resty.sh` | `openresty` or nginx with lua-nginx-module; skips otherwise |
 
@@ -512,6 +558,10 @@ there.
 | Legitimate clients blocked | Shared NAT or proxy over threshold, or aggregation | `unblock`, add the range to `allow_networks`, `reload`; raise `aggregate_k` |
 | A download's or update's server dropped; `status` starts with `CRITICAL:` (no sw_flowd flow table, or one of another layout), and the journal has it at `crit` | sw_flowd wasn't running when voidgate started, or its table is of another layout (`flows=none`): a broken install, not a state to run in (Seawall proposal 0015 §6) | Start sw_flowd, then restart voidgate: it binds the table when it starts. After an upgrade, the stack's sw_flowd and voidgate must come from one release |
 | SSH lost during an attack | Port not in `allow_ports`, or SSH on a non-local address | Keep `22` (or your SSH port) in `allow_ports`; check `local_networks` |
+| New connections take a second during an attack; `syn_guard=engaged` | First-SYN drop: a SYN flood is on, and a new client's first SYN is dropped once | Expected. A client that can't wait a second goes in `allow_networks` |
+| `WARNING: syn_guard: … SYNs passed unfiltered …: the thread that clears the filter is late`; `syn_guard_unready` rising | The daemon's thread didn't clear the filter's next generation in time, CPUs busy with the flood's softirqs, or the daemon stopped; those SYNs passed to the kernel's syncookies | Check CPU load and `systemctl status voidgate`; it recovers by itself |
+| `WARNING: syn_guard: an estimated …% of spoofed SYNs pass as retransmissions` | A flood big enough to fill the filter: more spoofed SYNs reach the kernel | Raise `syn_guard_bits` (one more halves what passes) and restart outside the flood |
+| `syn_guard=off` with `syn_guard = yes` | Its filter couldn't be set up at start (the log says why) | Read the log; restart |
 | `map_full` climbing | Too many sources for `remote_map_size` or `drop_map_size` | Lower `aggregate_k` so `/24` and `/64` drops relieve the tree; raise sizes and restart |
 | `ban()` from nginx does nothing | Worker user not in `voidgate`, or address in an allow list | Check the nginx error log for the daemon's answer |
 

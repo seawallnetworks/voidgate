@@ -91,7 +91,7 @@ src/%.o: src/%.c
 
 voidgate: $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A) $(LDFLAGS) \
-		-pthread
+		-pthread -lm
 
 voidgatectl: $(CTL_OBJS) $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS) $(LIBSW_A)
@@ -101,7 +101,7 @@ t/unit/policy: t/unit/policy.c src/policy.c src/policy.h \
 	$(BPFDIR)/voidgate.h src/config.o src/ipaddr.o src/log.o $(LIBSW_A)
 	$(CC) $(CFLAGS) -DVG_CTRL_TEST -MF t/unit/policy.d -o $@ \
 		t/unit/policy.c src/policy.c src/config.o src/ipaddr.o \
-		src/log.o $(LIBSW_A)
+		src/log.o $(LIBSW_A) -lm
 
 t/unit/cidr: t/unit/cidr.c src/config.o src/ipaddr.o src/log.o $(LIBSW_A)
 	$(CC) $(CFLAGS) -MF t/unit/cidr.d -o $@ t/unit/cidr.c src/config.o \

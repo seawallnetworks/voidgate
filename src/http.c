@@ -66,6 +66,35 @@ format_prometheus(struct vg_ctrl *c, const struct vg_metrics *m, char *buf,
                   (unsigned long long) m->rx_reply_bytes, c->wake_rx_pps,
                   c->maps->flows_fd >= 0 ? 1 : 0);
 
+    if (n < 0 || (size_t) n >= buflen) {
+        return;
+    }
+
+    /* first-SYN drop (Seawall proposal 0023 §6); enabled 0: syn_guard = no,
+     * or its filter couldn't be set up
+     */
+    n += snprintf(buf + n, buflen - (size_t) n,
+                  "# TYPE voidgate_syn_guard_enabled gauge\n"
+                  "voidgate_syn_guard_enabled %d\n"
+                  "# TYPE voidgate_syn_guard_engaged gauge\n"
+                  "voidgate_syn_guard_engaged %d\n"
+                  "# TYPE voidgate_syn_unproven_total counter\n"
+                  "voidgate_syn_unproven_total %llu\n"
+                  "# TYPE voidgate_syn_guard_dropped_total counter\n"
+                  "voidgate_syn_guard_dropped_total %llu\n"
+                  "# TYPE voidgate_syn_guard_retrans_total counter\n"
+                  "voidgate_syn_guard_retrans_total %llu\n"
+                  "# TYPE voidgate_syn_guard_unready_total counter\n"
+                  "voidgate_syn_guard_unready_total %llu\n"
+                  "# TYPE voidgate_syn_guard_fp_est gauge\n"
+                  "voidgate_syn_guard_fp_est %.6f\n",
+                  c->maps->syn != NULL, c->syn_engaged,
+                  (unsigned long long) m->syn_unproven,
+                  (unsigned long long) m->syn_guard_dropped,
+                  (unsigned long long) m->syn_guard_retrans,
+                  (unsigned long long) m->syn_guard_unready,
+                  c->syn_fp_est);
+
     if (n < 0 || (size_t) n >= buflen
         || vg_flows_stats(c->maps, &entries, &evicted) != 0)
     {

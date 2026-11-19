@@ -6,6 +6,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,9 @@ static uint64_t now_ms(void);
 static void attack_start(struct vg_ctrl *c);
 static void attack_end(struct vg_ctrl *c, int how, uint64_t end_ms);
 static void syn_engage(struct vg_ctrl *c);
+static void syn_feed(struct vg_ctrl *c, int kind, const char *cause);
+static double syn_fp_est(double per_gen, uint32_t blocks);
+static void syn_watch(struct vg_ctrl *c, uint64_t unready);
 
 
 static unsigned
@@ -388,6 +392,7 @@ attack_start(struct vg_ctrl *c)
     c->attack.pps = (uint64_t) c->wake_rx_pps;
     c->attack.bps = (uint64_t) c->wake_rx_bps;
     c->attack_dropped = c->last_m.dropped;
+    c->attack_syn_dropped = c->last_m.syn_guard_dropped;
     c->attack_open = 1;
 
     ch = feed_add(c, VG_FEED_ATTACK, NULL);
@@ -421,6 +426,9 @@ attack_end(struct vg_ctrl *c, int how, uint64_t end_ms)
     c->attack.how = (uint8_t) how;
     c->attack.dropped = c->last_m.dropped >= c->attack_dropped
                         ? c->last_m.dropped - c->attack_dropped : 0;
+    c->attack.syn_dropped =
+        c->last_m.syn_guard_dropped >= c->attack_syn_dropped
+        ? c->last_m.syn_guard_dropped - c->attack_syn_dropped : 0;
     c->attack_open = 0;
     c->last_attack = c->attack;
     c->have_last_attack = 1;
@@ -432,11 +440,12 @@ attack_end(struct vg_ctrl *c, int how, uint64_t end_ms)
     }
 
     sw_log_info("attack %llu ended (%s) after %llu s: peak %llu pps, "
-                "%llu dropped, %u cut, %u bans",
+                "%llu dropped, %llu first SYNs dropped, %u cut, %u bans",
                 (unsigned long long) c->attack.id, vg_attack_how_name(how),
                 (unsigned long long) (c->attack.end_ms - c->attack.start_ms)
                 / 1000, (unsigned long long) c->attack.pps,
-                (unsigned long long) c->attack.dropped, c->attack.cut,
+                (unsigned long long) c->attack.dropped,
+                (unsigned long long) c->attack.syn_dropped, c->attack.cut,
                 c->attack.bans);
 }
 
@@ -866,8 +875,11 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
         return -1;
     }
 
+    /* standby with the gate, in the attack it was engaged in */
     if (c->syn_engaged) {
         c->syn_engaged = 0;
+        c->syn_fp_est = 0;
+        syn_feed(c, VG_FEED_SYN_STANDBY, "disarm");
         sw_log_info("syn_guard: standby (disarmed)");
     }
 
@@ -1250,6 +1262,12 @@ vg_ctrl_tick(struct vg_ctrl *c)
                        ? m.rx_reply_bytes - c->last_m.rx_reply_bytes : 0;
         uint64_t dsyn = m.syn_unproven >= c->last_m.syn_unproven
                         ? m.syn_unproven - c->last_m.syn_unproven : 0;
+        uint64_t dsd = m.syn_guard_dropped >= c->last_m.syn_guard_dropped
+                       ? m.syn_guard_dropped - c->last_m.syn_guard_dropped
+                       : 0;
+        uint64_t dsu = m.syn_guard_unready >= c->last_m.syn_guard_unready
+                       ? m.syn_guard_unready - c->last_m.syn_guard_unready
+                       : 0;
 
         c->rx_pps = (double) dp / dt;
         c->rx_bps = (double) db * 8.0 / dt;
@@ -1261,6 +1279,8 @@ vg_ctrl_tick(struct vg_ctrl *c)
         c->wake_rx_pps = (double) (dp > drp ? dp - drp : 0) / dt;
         c->wake_rx_bps = (double) (db > drb ? db - drb : 0) * 8.0 / dt;
         c->syn_pps = (double) dsyn / dt;
+        c->syn_drop_pps = (double) dsd / dt;
+        syn_watch(c, dsu);
     }
 
     c->last_m = m;
@@ -1289,7 +1309,6 @@ vg_ctrl_tick(struct vg_ctrl *c)
 
     walk_remotes(c, dt);
     expire_drops(c);
-    syn_engage(c);
 
     sw_log_debug("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
                  "wake_rx(pps)=%-8.0f dropped(pps)=%-8.0f blocked=%d",
@@ -1312,6 +1331,9 @@ vg_ctrl_tick(struct vg_ctrl *c)
         if (c->quiet_since == 0) {
             c->quiet_since = time(NULL);
         }
+
+        /* first-SYN drop's standby, in the attack it was engaged in */
+        syn_engage(c);
 
         /* the attack ended when traffic fell, before the disarm, which
          * may come on this tick too (Seawall proposal 0017 §1)
@@ -1340,6 +1362,9 @@ vg_ctrl_tick(struct vg_ctrl *c)
         {
             attack_start(c);
         }
+
+        /* engaged in the attack that started on this tick */
+        syn_engage(c);
     }
 
     return 0;
@@ -1388,14 +1413,104 @@ syn_engage(struct vg_ctrl *c)
 
     c->syn_engaged = on;
     c->syn_quiet_since = 0;
+    c->syn_fp_est = 0;
+    c->syn_fp_warned = 0;
 
     if (on) {
+        syn_feed(c, VG_FEED_SYN_ENGAGE, NULL);
         sw_log_info("syn_guard: engaged, %.0f SYNs/s from unproven "
                     "addresses", c->syn_pps);
 
     } else {
+        syn_feed(c, VG_FEED_SYN_STANDBY, "quiet");
         sw_log_info("syn_guard: standby");
     }
+}
+
+
+/* An engage or standby on the feed: the open attack's id, 0 if none,
+ * and the tick's SYNs from unproven addresses a second.
+ */
+static void
+syn_feed(struct vg_ctrl *c, int kind, const char *cause)
+{
+    struct vg_feed_entry  *ch;
+
+    ch = feed_add(c, kind, cause);
+
+    if (ch != NULL) {
+        ch->attack.id = c->attack_open ? c->attack.id : 0;
+        ch->attack.pps = (uint64_t) c->syn_pps;
+    }
+}
+
+
+/*
+ * Engaged, the estimated false-pass rate (Seawall proposal 0023 §6):
+ * a SYN never seen passes when its 3 bits are all set in one of the 4
+ * older generations. Each holds the first SYNs written in 0.9 s, per_gen
+ * of them, over blocks of 512 bits: a block holds j of them with the
+ * Poisson chance of j at per_gen / blocks, and j keys set a bit with
+ * 1 - (1 - 1/512)^3j. Over 1% in a tick, a warning once a spell: more
+ * syn_guard_bits. Not engaged, nothing is written: 0.
+ */
+static void
+syn_watch(struct vg_ctrl *c, uint64_t unready)
+{
+    time_t    now = time(NULL);
+    uint32_t  blocks;
+
+    /* logged once a VG_SYN_UNREADY_SHOW, while status shows it */
+    if (unready > 0) {
+        if (now - c->syn_unready_at >= VG_SYN_UNREADY_SHOW) {
+            sw_log_warn("syn_guard: %llu SYNs passed unfiltered: the "
+                        "thread that clears the filter is late",
+                        (unsigned long long) unready);
+        }
+
+        c->syn_unready = unready;
+        c->syn_unready_at = now;
+    }
+
+    if (!c->syn_engaged) {
+        c->syn_fp_est = 0;
+        return;
+    }
+
+    blocks = 1U << (c->cfg->syn_guard_bits - VG_SYN_BLOCK_LOG2);
+    c->syn_fp_est = syn_fp_est(c->syn_drop_pps * VG_SYN_GEN_NS / 1e9,
+                               blocks);
+
+    if (c->syn_fp_est > VG_SYN_FP_WARN && !c->syn_fp_warned) {
+        c->syn_fp_warned = 1;
+        sw_log_warn("syn_guard: an estimated %.1f%% of spoofed SYNs pass "
+                    "as retransmissions; raise syn_guard_bits (now %d)",
+                    c->syn_fp_est * 100, c->cfg->syn_guard_bits);
+    }
+}
+
+
+static double
+syn_fp_est(double per_gen, uint32_t blocks)
+{
+    double lambda = per_gen / blocks, lo, hi, j, p = 0, pj;
+
+    if (lambda <= 0) {
+        return 0;
+    }
+
+    /* the Poisson terms that matter: around lambda, in logs, which
+     * exp(-lambda) alone would underflow past 745
+     */
+    lo = floor(lambda - 12 * sqrt(lambda) - 30);
+    hi = ceil(lambda + 12 * sqrt(lambda) + 30);
+
+    for (j = lo > 0 ? lo : 0; j <= hi; j++) {
+        pj = exp(j * log(lambda) - lambda - lgamma(j + 1));
+        p += pj * pow(1 - pow(1 - 1.0 / VG_SYN_BLOCK_BITS, 3 * j), 3);
+    }
+
+    return 1 - pow(1 - p, VG_SYN_OLDER);
 }
 
 

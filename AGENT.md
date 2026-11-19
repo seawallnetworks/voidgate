@@ -10,7 +10,9 @@ FastNetMon and must not grow FastNetMon’s capture backends.
 - Data plane: `src/bpf/voidgate.bpf.c` — pass or drop only. One
   `vg_judge()`, two entries: `voidgate_xdp` in libxdp's dispatcher,
   and `voidgate_tc` at TC ingress when another program holds the XDP
-  hook (degraded). The loader loads one.
+  hook (degraded); each with a twin, `_pl`, whose first-SYN filter sets
+  bits with plain writes, for a kernel before 5.12 (no atomic OR). The
+  loader loads one of the four.
 - Control plane: `src/voidgate.c` + `src/policy.c` — decides CIDRs,
   writes LPM maps.
 - No AF_XDP, no packet redirect to userspace, no
@@ -26,7 +28,9 @@ src/bpf/voidgate.h       shared structs (BPF + userspace). No libc.
 src/bpf/voidgate.bpf.c   XDP and TC entries (GPL-2.0-only)
 src/voidgate.c           daemon
 src/voidgatectl.c        voidgatectl (unix socket client)
-src/policy.c             IDLE/ACTIVE policy
+src/policy.c             IDLE/ACTIVE policy, first-SYN drop's engaging
+src/syn_guard.c          first-SYN drop's thread that clears its filter,
+                         the atomic-OR probe
 src/maps.c               libxdp / TC load and attach, LPM helpers
 src/config.c             key=value config
 src/ipaddr.c             CIDR parse / overlap
@@ -34,6 +38,7 @@ src/list.h               intrusive list / hlist (own code: the kernel's
                          list.h is GPL, userspace is Apache-2.0)
 configs/voidgate.conf
 t/*.t                    XDP verdict / CIDR blocks (Test::Base); see t/README.md
+t/syn/*.t                first-SYN drop's verdicts (VG_FIXTURE=syn)
 t/lib/VG/*.pm            suite glue: frame builder, ctl client
 t/bin/run                real daemon + prove t/ (needs root)
 t/unit/policy.c          control-plane unit test
@@ -55,8 +60,13 @@ binaries.
    `metrics.rx_*` then `XDP_PASS`.
 2. **XDP stays attached in IDLE.** Arming is a map write
    (`cfg.armed = 1`), not attach/detach. Detach only on process exit.
-3. **Control plane decides drops; XDP only looks them up.** No
-   thresholds in BPF.
+3. **Control plane decides policy; BPF executes per-packet mechanisms.**
+   Userspace decides what to block and when: arming, blocks, first-SYN
+   drop engaging and going to standby, all from counters BPF keeps. BPF
+   looks the decisions up and carries out what can only be done per
+   packet: the drop LPM, first-SYN drop's Bloom filter. No rate
+   thresholds in BPF; a per-packet mechanism's own constants (the
+   filter's generations) are not policy.
 4. **Whitelist / NDP / SSH before drop.** Never drop IPv6 NDP (types
    133–137 with hop limit 255), `fe80::/10`, `ff02::/16`, TCP
    `allow_ports` when the **local** side is that port (`dport` + dest in
@@ -79,7 +89,7 @@ binaries.
 
 ## State machine
 
-Userspace owns state. XDP only reads `cfg.armed`.
+Userspace owns state. XDP only reads it: `cfg.armed`, and `cfg.syn_engaged`.
 
 ```
 IDLE  -- wake_pps / wake_mbps or `voidgatectl arm` -->  ACTIVE
@@ -92,6 +102,15 @@ ACTIVE -- quiet for clear_seconds AND drop tree empty --> IDLE
 - `threshold_*`: this remote is part of the attack, install a drop.
 - Policy (ACTIVE, 1s): top remotes over threshold → `/32` or `/128`;
   dense clusters → `/24` or `/64`. Manual drops are not auto-expired.
+- First-SYN drop (Seawall proposal 0023), `syn_guard = yes`, ACTIVE
+  only: standby → engaged on a tick of `syn_unproven` over `wake_pps`,
+  whatever armed the gate; back to standby after `clear_seconds` below
+  it, or with the disarm (`cfg.syn_engaged`). Engaged, a pure SYN not in
+  the filter's last 4 generations is dropped; one that is goes on
+  through the checks after it, never straight to pass. A SYN to a port
+  not in `allow_ports` looks up the drop LPM first. With `syn_guard =
+  yes`, a pure SYN is never counted against its source. The filter's
+  slots are cleared by a thread, armed only.
 - Timed blocks (`block <cidr> ttl=<sec>`, reason 4) are L7 bans pushed by
   OpenResty. They lift at their own expiry, a re-ban only
   extends them, manual wins over them, and they never count toward
@@ -101,13 +120,15 @@ ACTIVE -- quiet for clear_seconds AND drop tree empty --> IDLE
 
 | Map | Type | Written when | Notes |
 |-----|------|----------------|-------|
-| `cfg` | ARRAY[1] | userspace | `armed`, allow_ports |
+| `cfg` | ARRAY[1] | userspace | `armed`, allow_ports, `syn_guard`, `syn_engaged` |
 | `metrics` | PERCPU_ARRAY[1] | always (rx); armed (dropped, …) | |
 | `drop_v4/v6` | LPM_TRIE | ACTIVE | empty in IDLE after disarm |
 | `allow_v4/v6` | LPM_TRIE | start/reload | |
 | `local_v4/v6` | LPM_TRIE | start/reload | this VM’s CIDRs |
 | `host_v4/v6` | PERCPU_HASH | armed | local IPs |
 | `remote_v4/v6` | LRU_PERCPU_HASH | armed | attack sources; not flushed |
+| `syn_bloom` | ARRAY, mmap | BPF armed; userspace zeroes a slot | first-SYN filter: 6 slots × 2^(`syn_guard_bits`−9) 64-byte blocks |
+| `syn_marks` | ARRAY[1], mmap | userspace only, release | the generation each slot was cleared for |
 
 LPM lookup key prefixlen is 32/128 for a host query. LPM_TRIE maps need
 `BPF_F_NO_PREALLOC`.
@@ -120,6 +141,7 @@ make test                         # t/unit/* + sudo t/bin/run
 sudo t/integration/netns.sh
 sudo t/integration/daemon.sh
 sudo t/integration/resty.sh       # needs nginx + lua module; else skips
+sudo t/integration/syn.sh         # first-SYN drop under floods
 ```
 
 Needs clang, llvm, libbpf, libxdp, bpftool, libelf, libtest-base-perl,

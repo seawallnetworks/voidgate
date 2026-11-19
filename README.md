@@ -27,6 +27,14 @@ sw_flowd's table, so the host's own downloads don't arm the gate (Seawall
 proposal 0017 §1); idle, the data path parses each frame for that only
 while the table is bound, and nothing without it.
 
+Armed, a SYN flood over `wake_pps` from addresses the host hasn't sent
+data to engages first-SYN drop (Seawall proposal 0023): a SYN is dropped
+the first time and remembered in a generational Bloom filter, and passed
+on when the client sends it again a second later, as real clients do and
+spoofed sources don't. The host answers no SYN-ACK to a spoofed SYN; a
+new client's first connection waits a second. See
+[`doc/operations.md`](doc/operations.md) §3.
+
 ## Requirements
 
 - Linux 5.10+ with BTF (`/sys/kernel/btf/vmlinux`), and bpffs at
@@ -37,8 +45,9 @@ while the table is bound, and nothing without it.
   flow table voidgate reads: `make -C ../sw_flowd install-header` (or its
   `make install`) puts it in `/usr/local/seawall/include`;
   `SW_FLOWD_PREFIX` points elsewhere
-- [libpkt](https://github.com/seawallnetworks/libpkt), the stack's packet
-  parser: `make -C ../libpkt install` puts its headers in
+- [libpkt](https://github.com/seawallnetworks/libpkt), one with
+  `tcp_seq`, the stack's packet parser: `make -C ../libpkt install`
+  puts its headers in
   `/usr/local/seawall/include`; `LIBPKT_PREFIX` points elsewhere
 - `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_SYS_ADMIN`, which libxdp needs to
   read the hook's programs and use its dispatcher (root is fine)
@@ -162,8 +171,9 @@ voidgatectl -s /run/voidgate-monitor.sock feed
 ```
 
 - `feed` gives the cursor; `feed <epoch> <seq>` every entry after it,
-  oldest first: blocks added and lifted, arm, disarm and reload, and
-  attacks started and ended (below).
+  oldest first: blocks added and lifted, arm, disarm and reload,
+  attacks started and ended, and first-SYN drop engaged and back to
+  standby (below).
 
   ```
   epoch=9f2c41d07a6be3e1 seq=3 oldest=1 gap=0 n=2 more=0
@@ -195,7 +205,7 @@ voidgatectl -s /run/voidgate-monitor.sock feed
 
   ```
   seq=7 time=1763150000123 kind=attack source=self id=1 wake_rx_pps=25268 wake_rx_bps=21427032
-  seq=12 time=1763150004378 kind=attack-end source=self cause=quiet id=1 start=1763150000123 end=1763150002000 how=quiet tick_peak_pps=27575 tick_peak_bps=23383708 dropped=83898 cut=1 bans=0
+  seq=12 time=1763150004378 kind=attack-end source=self cause=quiet id=1 start=1763150000123 end=1763150002000 how=quiet tick_peak_pps=27575 tick_peak_bps=23383708 dropped=83898 syn_dropped=0 cut=1 bans=0
   ```
 
   `wake_rx_*`, the rates that started it; `tick_peak_*`, the highest
@@ -207,6 +217,19 @@ voidgatectl -s /run/voidgate-monitor.sock feed
   (`last_attack_id`, `_start`, `_end`, `_how`, `_tick_peak_pps`,
   `_tick_peak_bps`, `_dropped`, `_cut`, `_bans`) until the next one ends.
   `voidgatectl status`'s table shows `attack` alone; `-r status` has all.
+  `syn_dropped` (`last_attack_syn_dropped`) is the first SYNs first-SYN
+  drop dropped while it was open, which `dropped` doesn't count.
+- **First-SYN drop** (Seawall proposal 0023, `doc/operations.md` §3)
+  engaging and going back to standby, with the open attack's id
+  (`attack=0` if none) and the tick's SYNs from unproven addresses a
+  second; standby with `cause=quiet` after `clear_seconds`, or
+  `cause=disarm` with the gate, before the attack's end:
+
+  ```
+  seq=8 time=1763150001123 kind=syn-engage source=self attack=1 syn_unproven_pps=96210
+  seq=11 time=1763150004378 kind=syn-standby source=self cause=quiet attack=1 syn_unproven_pps=12
+  ```
+
 - `blocks`, then `blocks after <next>` until `next=end`: every listed
   block, 256 a page, oldest first by id (ids only grow). `voidgatectl
   blocks` reads every page and prints one table; `voidgatectl -r blocks`

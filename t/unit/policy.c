@@ -31,6 +31,9 @@ static void test_feed_wrap(void);
 static void test_feed_ban(void);
 static void test_wake_replies(void);
 static void test_syn_engage(void);
+static void test_syn_attack(void);
+static const struct vg_feed_entry *feed_kind(struct vg_ctrl *c,
+    uint64_t seq, int kind);
 static void test_attacks(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
@@ -1057,9 +1060,11 @@ test_wake_replies(void)
 static void
 test_syn_engage(void)
 {
-    struct vg_config  cfg;
-    struct vg_maps    maps;
-    struct vg_ctrl    c;
+    struct vg_config             cfg;
+    struct vg_maps               maps;
+    struct vg_ctrl               c;
+    const struct vg_feed_entry  *ch;
+    uint64_t                     seq;
 
     vg_config_defaults(&cfg);
     cfg.remote_map_size = 16;
@@ -1085,10 +1090,36 @@ test_syn_engage(void)
     wake_tick(&c, 5000, 0);
     assert(!c.syn_engaged);
 
-    /* over: engaged, committed */
+    /* over: engaged, committed, on the feed in the open attack */
     stub_metrics.syn_unproven += 2500;
     wake_tick(&c, 5000, 0);
     assert(c.syn_engaged && committed_engaged == 1);
+    assert(c.attack_open);
+    ch = feed_kind(&c, c.seq, VG_FEED_SYN_ENGAGE);
+    assert(ch->attack.id == c.attack.id && ch->attack.pps > 2400
+           && ch->attack.pps < 2600);
+
+    /* 1,000,000 first SYNs a second, 2^25 bits: about 0.22% (0023 §3) */
+    assert(c.syn_fp_est == 0);
+    stub_metrics.syn_unproven += 1000000;
+    stub_metrics.syn_guard_dropped += 1000000;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_fp_est > 0.0020 && c.syn_fp_est < 0.0024);
+    assert(!c.syn_fp_warned);
+
+    /* 3,000,000: about 4.1%, over the warning's 1% */
+    stub_metrics.syn_unproven += 3000000;
+    stub_metrics.syn_guard_dropped += 3000000;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_fp_est > 0.039 && c.syn_fp_est < 0.043);
+    assert(c.syn_fp_warned);
+
+    /* SYNs passed unfiltered: kept for status */
+    assert(c.syn_unready_at == 0);
+    stub_metrics.syn_guard_unready += 5;
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_unready == 5 && c.syn_unready_at != 0);
 
     /* below, inside clear_seconds: still engaged */
     wake_tick(&c, 5000, 0);
@@ -1099,10 +1130,12 @@ test_syn_engage(void)
     wake_tick(&c, 5000, 0);
     assert(c.syn_engaged && c.syn_quiet_since == 0);
 
-    /* below for clear_seconds: standby, committed */
+    /* below for clear_seconds: standby, committed, on the feed */
     cfg.clear_seconds = 0;
     wake_tick(&c, 5000, 0);
-    assert(!c.syn_engaged && committed_engaged == 0);
+    assert(!c.syn_engaged && committed_engaged == 0 && c.syn_fp_est == 0);
+    ch = feed_kind(&c, c.seq, VG_FEED_SYN_STANDBY);
+    assert(strcmp(ch->cause, "quiet") == 0 && ch->attack.id == c.attack.id);
 
     /* a failed commit changes nothing */
     stub_metrics.syn_unproven += 2500;
@@ -1115,8 +1148,16 @@ test_syn_engage(void)
     stub_metrics.syn_unproven += 2500;
     wake_tick(&c, 5000, 0);
     assert(c.syn_engaged);
+    seq = c.seq;
     assert(vg_ctrl_disarm(&c, "test") == 0);
     assert(!c.syn_engaged && committed_engaged == 0);
+
+    /* standby, then the attack's end, with its first SYNs, then disarm */
+    ch = feed_kind(&c, seq + 1, VG_FEED_SYN_STANDBY);
+    assert(strcmp(ch->cause, "disarm") == 0);
+    ch = feed_kind(&c, seq + 2, VG_FEED_ATTACK_END);
+    assert(ch->attack.syn_dropped == 4000000);
+    feed_kind(&c, seq + 3, VG_FEED_DISARM);
 
     /* syn_guard off: no filter thread, never engaged */
     maps.syn = NULL;
@@ -1124,6 +1165,65 @@ test_syn_engage(void)
     stub_metrics.syn_unproven += 2500;
     wake_tick(&c, 5000, 0);
     assert(!c.syn_engaged);
+
+    vg_ctrl_free(&c);
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+}
+
+
+/*
+ * A SYN flood on a gate armed already, an earlier attack over: the
+ * attack starts first, and first-SYN drop engages in it, on one tick;
+ * its standby is in it too, before the attack's end on a tick that has
+ * both.
+ */
+static void
+test_syn_attack(void)
+{
+    struct vg_config             cfg;
+    struct vg_maps               maps;
+    struct vg_ctrl               c;
+    struct vg_cidr               p;
+    const struct vg_feed_entry  *ch;
+    uint64_t                     seq;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.wake_pps = 2000;
+    cfg.wake_mbps = 1000;
+    cfg.clear_seconds = 0;
+    nitems = 0;
+    complete_scan = 1;
+    memset(&maps, 0, sizeof(maps));
+    maps.syn = (struct vg_syn *) &maps;     /* never dereferenced here */
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+    assert(vg_ctrl_init(&c, &cfg, &maps, NULL, NULL) == 0);
+    c.last_m = stub_metrics;
+
+    /* attack 1, a UDP flood; a block keeps the gate armed after it */
+    wake_tick(&c, 5000, 0);
+    assert(c.state == VG_ACTIVE && c.attack_open && c.attack.id == 1);
+    assert(vg_parse_cidr("203.0.113.1/32", &p) == 0);
+    assert(vg_ctrl_drop(&c, &p, VG_REASON_MANUAL) == 0);
+    wake_tick(&c, 100, 0);
+    assert(c.state == VG_ACTIVE && !c.attack_open);
+
+    /* a SYN flood: attack 2, then first-SYN drop engaged in it */
+    seq = c.seq;
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(c.attack_open && c.attack.id == 2 && c.syn_engaged);
+    feed_kind(&c, seq + 1, VG_FEED_ATTACK);
+    ch = feed_kind(&c, seq + 2, VG_FEED_SYN_ENGAGE);
+    assert(ch->attack.id == 2);
+
+    /* both over on one tick: standby in attack 2, then its end */
+    seq = c.seq;
+    wake_tick(&c, 100, 0);
+    assert(!c.syn_engaged && !c.attack_open && c.state == VG_ACTIVE);
+    ch = feed_kind(&c, seq + 1, VG_FEED_SYN_STANDBY);
+    assert(strcmp(ch->cause, "quiet") == 0 && ch->attack.id == 2);
+    feed_kind(&c, seq + 2, VG_FEED_ATTACK_END);
 
     vg_ctrl_free(&c);
     memset(&stub_metrics, 0, sizeof(stub_metrics));
@@ -1526,6 +1626,7 @@ main(void)
     test_feed_ban();
     test_wake_replies();
     test_syn_engage();
+    test_syn_attack();
     test_attacks();
     test_blocks_pages();
     puts("control-plane regression tests passed");

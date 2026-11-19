@@ -63,6 +63,7 @@ static void ctl_feed(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int feed_line(const struct vg_feed_entry *ch, char *out, size_t size);
 static int status_attacks(struct vg_ctrl *ctrl, char *out, size_t size);
+static int status_warnings(struct vg_ctrl *ctrl, char *out, size_t size);
 static void ctl_blocks(struct vg_ctrl *ctrl, const char *args,
     char *reply, size_t reply_size);
 static int parse_u64(const char *s, int base, uint64_t *out);
@@ -145,12 +146,13 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
     int  n;
 
     n = ctl_critical(ctrl, reply, reply_size);
+    n += status_warnings(ctrl, reply + n, reply_size - (size_t) n);
 
     n += snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
              "wake_rx_pps=%.0f wake_rx_bps=%.0f "
              "blocked=%d degraded=%d iface=%s hook=%s flows=%s "
-             "syn_guard=%s",
+             "syn_guard=%s syn_guard_fp_est=%.6f",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
              ctrl->wake_rx_pps, ctrl->wake_rx_bps,
@@ -158,12 +160,47 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
              ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none",
              ctrl->maps->syn == NULL ? "off"
-             : ctrl->syn_engaged ? "engaged" : "standby");
+             : ctrl->syn_engaged ? "engaged" : "standby",
+             ctrl->syn_fp_est);
 
     /* the words of Seawall proposal 0017 §2, on the same line */
     if (n > 0 && (size_t) n < reply_size) {
         (void) status_attacks(ctrl, reply + n, reply_size - (size_t) n);
     }
+}
+
+
+/*
+ * First-SYN drop's warnings (Seawall proposal 0023 §6), lines before the
+ * state's, with no "=" in them, as the CRITICAL line: SYNs passed
+ * unfiltered in the last VG_SYN_UNREADY_SHOW seconds, userspace late to
+ * clear the filter; an estimated false-pass rate over VG_SYN_FP_WARN.
+ * Returns their length.
+ */
+static int
+status_warnings(struct vg_ctrl *ctrl, char *out, size_t size)
+{
+    int  w = 0;
+
+    out[0] = '\0';
+
+    if (ctrl->syn_unready_at != 0
+        && time(NULL) - ctrl->syn_unready_at < VG_SYN_UNREADY_SHOW)
+    {
+        w += snprintf(out, size, "WARNING: syn_guard: %" PRIu64 " SYNs "
+                      "passed unfiltered %lld s ago: the thread that "
+                      "clears the filter is late\n", ctrl->syn_unready,
+                      (long long) (time(NULL) - ctrl->syn_unready_at));
+    }
+
+    if (ctrl->syn_fp_est > VG_SYN_FP_WARN && w >= 0 && (size_t) w < size) {
+        w += snprintf(out + w, size - (size_t) w, "WARNING: syn_guard: an "
+                      "estimated %.1f%% of spoofed SYNs pass as "
+                      "retransmissions; raise syn_guard_bits\n",
+                      ctrl->syn_fp_est * 100);
+    }
+
+    return w < 0 ? 0 : (size_t) w >= size ? (int) size - 1 : w;
 }
 
 
@@ -195,10 +232,11 @@ status_attacks(struct vg_ctrl *ctrl, char *out, size_t size)
                       " last_attack_tick_peak_pps=%" PRIu64
                       " last_attack_tick_peak_bps=%" PRIu64
                       " last_attack_dropped=%" PRIu64
+                      " last_attack_syn_dropped=%" PRIu64
                       " last_attack_cut=%u last_attack_bans=%u",
                       l->id, l->start_ms, l->end_ms,
                       vg_attack_how_name(l->how), l->pps, l->bps,
-                      l->dropped, l->cut, l->bans);
+                      l->dropped, l->syn_dropped, l->cut, l->bans);
     }
 
     if (w > 0 && (size_t) w + 1 < size) {
@@ -569,7 +607,8 @@ static int
 feed_line(const struct vg_feed_entry *ch, char *out, size_t size)
 {
     static const char  *kinds[] = {
-        "block", "unblock", "arm", "disarm", "reload", "attack", "attack-end"
+        "block", "unblock", "arm", "disarm", "reload", "attack", "attack-end",
+        "syn-engage", "syn-standby"
     };
 
     int   w, n;
@@ -611,11 +650,21 @@ feed_line(const struct vg_feed_entry *ch, char *out, size_t size)
         n = snprintf(out + w, size - (size_t) w,
                      " id=%" PRIu64 " start=%" PRIu64 " end=%" PRIu64
                      " how=%s tick_peak_pps=%" PRIu64 " tick_peak_bps=%"
-                     PRIu64 " dropped=%" PRIu64 " cut=%u bans=%u",
+                     PRIu64 " dropped=%" PRIu64 " syn_dropped=%" PRIu64
+                     " cut=%u bans=%u",
                      ch->attack.id, ch->attack.start_ms, ch->attack.end_ms,
                      vg_attack_how_name(ch->attack.how), ch->attack.pps,
-                     ch->attack.bps, ch->attack.dropped, ch->attack.cut,
+                     ch->attack.bps, ch->attack.dropped,
+                     ch->attack.syn_dropped, ch->attack.cut,
                      ch->attack.bans);
+        w += n;
+
+    } else if (ch->kind == VG_FEED_SYN_ENGAGE
+               || ch->kind == VG_FEED_SYN_STANDBY)
+    {
+        n = snprintf(out + w, size - (size_t) w,
+                     " attack=%" PRIu64 " syn_unproven_pps=%" PRIu64,
+                     ch->attack.id, ch->attack.pps);
         w += n;
     }
 

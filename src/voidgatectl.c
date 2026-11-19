@@ -474,9 +474,10 @@ stats_once(const char *path)
  * status as one row: a column for each key=value the daemon gives, in
  * its order, so a new key needs no change here; but the rates, rx_pps,
  * rx_bps, wake_rx_pps and wake_rx_bps, which are traffic; and the open
- * and last attacks' details (attack_*, last_attack_*), which -r status
- * gives: the table says attack=0 or 1. A line without "=" (CRITICAL)
- * comes first, as is.
+ * and last attacks' details (attack_*, last_attack_*), and first-SYN
+ * drop's (syn_guard_*), which -r status gives: the table says attack=0
+ * or 1, and syn_guard. A line without "=" (CRITICAL, WARNING) comes
+ * first, as is.
  */
 static int
 status_table(const char *path)
@@ -529,7 +530,8 @@ status_table(const char *path)
                 || strcmp(word, "wake_rx_pps") == 0
                 || strcmp(word, "wake_rx_bps") == 0
                 || strncmp(word, "attack_", 7) == 0
-                || strncmp(word, "last_attack_", 12) == 0)
+                || strncmp(word, "last_attack_", 12) == 0
+                || strncmp(word, "syn_guard_", 10) == 0)
             {
                 continue;
             }

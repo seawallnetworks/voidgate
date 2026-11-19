@@ -36,8 +36,16 @@ enum vg_feed_kind {
     VG_FEED_DISARM,         /* every block lifted with it */
     VG_FEED_RELOAD,
     VG_FEED_ATTACK,         /* an attack started (Seawall proposal 0017) */
-    VG_FEED_ATTACK_END      /* and ended, with its summary */
+    VG_FEED_ATTACK_END,     /* and ended, with its summary */
+    VG_FEED_SYN_ENGAGE,     /* first-SYN drop engaged (Seawall proposal
+                               0023 §6), in the open attack if any */
+    VG_FEED_SYN_STANDBY     /* and back to standby */
 };
+
+/* An estimated false-pass rate over this asks for more syn_guard_bits. */
+#define VG_SYN_FP_WARN  0.01
+/* syn_guard_unready rising is shown in status this long after. */
+#define VG_SYN_UNREADY_SHOW  60
 
 /* How an attack ended (Seawall proposal 0017 §1). */
 enum vg_attack_how {
@@ -60,7 +68,10 @@ struct vg_attack {
                                            entry; the highest tick so far,
                                            or of it, otherwise */
     uint64_t                bps;
-    uint64_t                dropped;    /* all dropped while open */
+    uint64_t                dropped;    /* all the drop list dropped while
+                                           open */
+    uint64_t                syn_dropped;  /* first SYNs dropped while open
+                                             (Seawall proposal 0023) */
     uint32_t                cut;        /* policy and aggregate blocks
                                            added while open */
     uint32_t                bans;       /* ban socket blocks added */
@@ -141,7 +152,15 @@ struct vg_ctrl {
      */
     int                     syn_engaged;
     double                  syn_pps;        /* syn_unproven, last tick */
+    double                  syn_drop_pps;   /* first SYNs dropped */
     time_t                  syn_quiet_since;
+    double                  syn_fp_est;     /* spoofed SYNs passing as
+                                               retransmissions, 0 to 1,
+                                               estimated while engaged */
+    int                     syn_fp_warned;  /* this engaged spell */
+    uint64_t                syn_unready;    /* passed unfiltered, last tick
+                                               they did */
+    time_t                  syn_unready_at;
     struct vg_drop_rec     *drop_pool;      /* 2 x drop_map_size (v4 + v6) */
     unsigned                drop_pool_cap;
     unsigned                drop_used;      /* pool records ever handed out */
@@ -171,6 +190,7 @@ struct vg_ctrl {
     int                     attack_open;
     struct vg_attack        attack;         /* the open one, peaks so far */
     uint64_t                attack_dropped; /* metrics' dropped at its start */
+    uint64_t                attack_syn_dropped;
     uint64_t                attack_ids;     /* the last id handed out */
     int                     have_last_attack;
     struct vg_attack        last_attack;    /* the last ended; a restart
