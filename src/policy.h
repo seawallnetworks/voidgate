@@ -68,10 +68,10 @@ struct vg_attack {
                                            entry; the highest tick so far,
                                            or of it, otherwise */
     uint64_t                bps;
-    uint64_t                dropped;    /* all the drop list dropped while
-                                           open */
+    uint64_t                dropped;    /* all dropped while open */
     uint64_t                syn_dropped;  /* first SYNs dropped while open
-                                             (Seawall proposal 0023) */
+                                             (Seawall proposal 0023), in
+                                             dropped too */
     uint32_t                cut;        /* policy and aggregate blocks
                                            added while open */
     uint32_t                bans;       /* ban socket blocks added */

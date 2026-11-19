@@ -229,6 +229,8 @@ status` says `syn_guard=engaged`, `standby` or `off`, and the feed has
 - The filter is empty after a restart: a restart during a flood drops
   every new SYN once more.
 - A SYN flood under `wake_pps` is left to the kernel's syncookies.
+- Only SYNs to the host's own addresses (`local_networks`) are checked;
+  SYNs the host routes or forwards to other addresses pass unchecked.
 - TCP Fast Open clients connecting during the flood go without it for a
   while; their connections are fine.
 - 24 MB of memory at `syn_guard_bits = 25`, resident whether engaged or
@@ -352,8 +354,8 @@ are blocked now; `voidgatectl blocks` lists them. The errors,
 `reply_passed`, `rx_reply_pkts` and `rx_reply_bytes`, normal traffic, are
 only in `-r stats`, which has every digit. So are first-SYN drop's:
 `syn_unproven`, armed, SYNs from unproven addresses, before its filter
-(what engages it); `syn_guard_dropped`, first SYNs it dropped, not in
-`dropped`, the drop list's; `syn_guard_retrans`, SYNs it found again,
+(what engages it); `syn_guard_dropped`, first SYNs it dropped, counted
+in `dropped` too; `syn_guard_retrans`, SYNs it found again,
 passed on; `syn_guard_unready`, SYNs passed unfiltered while its next
 generation wasn't cleared in time. `status`'s `wake_rx_pps` and
 `wake_rx_bps` are the rates the wake thresholds compare, rx less the
@@ -392,7 +394,7 @@ Prometheus, when `metrics_port` is positive, is
 | `voidgate_degraded` | gauge | 1: judging at TC, not XDP |
 | `voidgate_rx_pps` | gauge | trend: all received traffic, the host's own replies included |
 | `voidgate_rx_packets_total`, `voidgate_rx_bytes_total` | counter | target down (no scrape) |
-| `voidgate_dropped_packets_total` | counter | rate > 0 means an attack is being cut |
+| `voidgate_dropped_packets_total` | counter | rate > 0 means an attack is being cut; first-SYN drop's drops included |
 | `voidgate_blocked` | gauge | near `drop_map_size` |
 | `voidgate_map_full_total` | counter | any increase: the drop tree or source map is full |
 | `voidgate_reply_passed_packets_total` | counter | trend: replies to the host's own flows an armed gate passed |

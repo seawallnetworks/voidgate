@@ -17,7 +17,7 @@ __DATA__
 --- engage
 --- packets: ipv4 tcp 203.0.113.100:40000 > 198.51.100.10:80 seq=1001
 --- verdict: XDP_DROP
---- counters: syn_unproven=1 syn_guard_dropped=1 dropped=0
+--- counters: syn_unproven=1 syn_guard_dropped=1 dropped=1
 
 
 
@@ -25,7 +25,7 @@ __DATA__
 --- engage
 --- packets: ipv6 tcp [2001:db8::100]:40000 > [2001:db8::10]:80 seq=1002
 --- verdict: XDP_DROP
---- counters: syn_unproven=1 syn_guard_dropped=1 dropped=0
+--- counters: syn_unproven=1 syn_guard_dropped=1 dropped=1
 
 
 
@@ -59,7 +59,7 @@ XDP_PASS
 --- engage
 --- packets: 2x ipv4 tcp 203.0.113.102:40000 > 198.51.100.10:80 seq=1005
 --- verdict: XDP_DROP
---- counters: syn_unproven=2 syn_guard_dropped=2 syn_guard_retrans=0
+--- counters: syn_unproven=2 syn_guard_dropped=2 syn_guard_retrans=0 dropped=2
 
 
 
@@ -173,7 +173,7 @@ ipv4 tcp 203.0.113.111:40000 > 198.51.100.10:80 seq=1015
 --- verdict
 XDP_DROP
 XDP_DROP
---- counters: dropped=1 syn_unproven=1 syn_guard_dropped=1 syn_guard_retrans=0
+--- counters: dropped=2 syn_unproven=1 syn_guard_dropped=1 syn_guard_retrans=0
 
 
 
@@ -188,7 +188,7 @@ ipv6 tcp [2001:db8::111]:40000 > [2001:db8::10]:80 seq=1016
 --- verdict
 XDP_DROP
 XDP_DROP
---- counters: dropped=1 syn_unproven=1 syn_guard_dropped=1 syn_guard_retrans=0
+--- counters: dropped=2 syn_unproven=1 syn_guard_dropped=1 syn_guard_retrans=0
 
 
 
@@ -204,7 +204,7 @@ ipv4 tcp 203.0.113.112:40000 > 198.51.100.10:22 seq=1018 flags=A
 XDP_DROP
 XDP_PASS
 XDP_PASS
---- counters: dropped=0 syn_unproven=2 syn_guard_dropped=1 syn_guard_retrans=1
+--- counters: dropped=1 syn_unproven=2 syn_guard_dropped=1 syn_guard_retrans=1
 
 
 
@@ -218,7 +218,7 @@ ipv4 tcp 203.0.113.113:40000 > 198.51.100.10:80 seq=1019
 --- verdict
 XDP_DROP
 XDP_DROP
---- counters: dropped=1 syn_guard_dropped=1
+--- counters: dropped=2 syn_guard_dropped=1
 
 
 

@@ -440,7 +440,7 @@ attack_end(struct vg_ctrl *c, int how, uint64_t end_ms)
     }
 
     sw_log_info("attack %llu ended (%s) after %llu s: peak %llu pps, "
-                "%llu dropped, %llu first SYNs dropped, %u cut, %u bans",
+                "%llu dropped, %llu of them first SYNs, %u cut, %u bans",
                 (unsigned long long) c->attack.id, vg_attack_how_name(how),
                 (unsigned long long) (c->attack.end_ms - c->attack.start_ms)
                 / 1000, (unsigned long long) c->attack.pps,

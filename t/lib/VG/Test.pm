@@ -107,7 +107,7 @@ my $send = sub {
 
     my %d = map { $_ => ($after->{$_} // 0) - ($before->{$_} // 0) }
             @COUNTERS;
-    my $dropped = $d{dropped} + $d{syn_guard_dropped};
+    my $dropped = $d{dropped};    # first-SYN drop's included
 
     $sum->{$_} += $d{$_} for @COUNTERS;
 

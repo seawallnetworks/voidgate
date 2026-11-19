@@ -218,7 +218,7 @@ voidgatectl -s /run/voidgate-monitor.sock feed
   `_tick_peak_bps`, `_dropped`, `_cut`, `_bans`) until the next one ends.
   `voidgatectl status`'s table shows `attack` alone; `-r status` has all.
   `syn_dropped` (`last_attack_syn_dropped`) is the first SYNs first-SYN
-  drop dropped while it was open, which `dropped` doesn't count.
+  drop dropped while it was open, counted in `dropped` too.
 - **First-SYN drop** (Seawall proposal 0023, `doc/operations.md` §3)
   engaging and going back to standby, with the open attack's id
   (`attack=0` if none) and the tick's SYNs from unproven addresses a

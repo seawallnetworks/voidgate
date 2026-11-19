@@ -1103,6 +1103,7 @@ test_syn_engage(void)
     assert(c.syn_fp_est == 0);
     stub_metrics.syn_unproven += 1000000;
     stub_metrics.syn_guard_dropped += 1000000;
+    stub_metrics.dropped += 1000000;     /* in dropped too, as BPF counts */
     wake_tick(&c, 5000, 0);
     assert(c.syn_fp_est > 0.0020 && c.syn_fp_est < 0.0024);
     assert(!c.syn_fp_warned);
@@ -1110,6 +1111,7 @@ test_syn_engage(void)
     /* 3,000,000: about 4.1%, over the warning's 1% */
     stub_metrics.syn_unproven += 3000000;
     stub_metrics.syn_guard_dropped += 3000000;
+    stub_metrics.dropped += 3000000;
     wake_tick(&c, 5000, 0);
     assert(c.syn_fp_est > 0.039 && c.syn_fp_est < 0.043);
     assert(c.syn_fp_warned);
@@ -1156,7 +1158,8 @@ test_syn_engage(void)
     ch = feed_kind(&c, seq + 1, VG_FEED_SYN_STANDBY);
     assert(strcmp(ch->cause, "disarm") == 0);
     ch = feed_kind(&c, seq + 2, VG_FEED_ATTACK_END);
-    assert(ch->attack.syn_dropped == 4000000);
+    assert(ch->attack.syn_dropped == 4000000
+           && ch->attack.dropped == 4000000);
     feed_kind(&c, seq + 3, VG_FEED_DISARM);
 
     /* syn_guard off: no filter thread, never engaged */

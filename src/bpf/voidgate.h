@@ -46,7 +46,8 @@ struct vg_metrics {
     __u64  rx_bytes;   /* L2 bytes of rx_pkts */
     __u64  passed;     /* passed, idle or judged; not one with no
                           addresses, in parse_err only */
-    __u64  dropped;    /* dropped by the drop LPM */
+    __u64  dropped;    /* all drops: the drop LPM's, a bad header's
+                          too, and first-SYN drop's */
     __u64  non_ip;     /* armed, not IPv4/IPv6 */
     __u64  map_full;   /* host/remote hash insert failed */
     __u64  parse_err;  /* bad header; still judged by the drop LPM when
@@ -63,7 +64,7 @@ struct vg_metrics {
     __u64  syn_unproven;    /* SYNs from unproven addresses, before the
                                filter, engaged or not; not those the drop
                                LPM drops first. What engages it */
-    __u64  syn_guard_dropped;  /* first SYNs dropped */
+    __u64  syn_guard_dropped;  /* first SYNs dropped, in dropped too */
     __u64  syn_guard_retrans;  /* found in an older generation: passed
                                   on to the checks after it */
     __u64  syn_guard_unready;  /* the current slot not cleared in time:

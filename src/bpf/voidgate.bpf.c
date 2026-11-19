@@ -467,7 +467,9 @@ syn_judge(struct vg_metrics *m, __u64 pkts, __u64 h, int atomic)
 {
     int rc = atomic ? vg_syn_filter(h) : vg_syn_filter_pl(h);
 
+    /* in dropped too: every drop counts there, this one's share apart */
     if (rc == VG_SYN_DROP) {
+        m->dropped += pkts;
         m->syn_guard_dropped += pkts;
 
         return VG_DROP;
