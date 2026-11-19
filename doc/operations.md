@@ -233,6 +233,18 @@ status` says `syn_guard=engaged`, `standby` or `off`, and the feed has
   while; their connections are fine.
 - 24 MB of memory at `syn_guard_bits = 25`, resident whether engaged or
   not.
+- CPU, engaged: 450 to 750 ns more a SYN where the filter misses the
+  cache, as it will once a flood spreads over its 24 MB; under 150 ns
+  more where it hits (`t/bench/syn-cost`, a 2-vCPU VM with 16 MB of L3,
+  varying from run to run). At 1,000,000 SYNs a second, half to three
+  quarters of a core. Spoofed SYNs passed as
+  retransmissions, measured: 0.23% at 1,000,000 a second, 4% at
+  3,000,000, 52% at 10,000,000, as `syn_guard_fp_est` estimates.
+- On Linux before 5.12 (no atomic OR in BPF), the filter reads the
+  precise clock, `bpf_ktime_get_ns()`, which on a VM whose clocksource is
+  HPET (`/sys/devices/system/clocksource/clocksource0/current_clocksource`)
+  costs about 13 µs a call, capping an engaged gate near 75,000 SYNs a
+  second a core. 5.12 and later read the coarse clock, a memory read.
 
 A reload with a bad value logs `<file>:<line>: bad value for <key>`,
 answers `error: reload failed` and keeps the running config. An unknown
@@ -514,6 +526,7 @@ restart.
 | Daemon startup and logging | `sudo t/integration/daemon.sh` | root; runs in private namespaces |
 | Network-namespace end to end | `sudo t/integration/netns.sh` | root; private namespaces |
 | First-SYN drop under floods | `sudo t/integration/syn.sh` | root; private namespaces |
+| First-SYN drop's cost a SYN and false passes | `make t/bench/syn-cost && sudo t/bench/syn-cost` | root, BPF; a manual bench, about a minute |
 | Sharing the hook with other programs | `sudo t/integration/coexist.sh` | root |
 | OpenResty client | `sudo t/integration/resty.sh` | `openresty` or nginx with lua-nginx-module; skips otherwise |
 

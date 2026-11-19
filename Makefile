@@ -114,6 +114,12 @@ t/bench/idle-cost: t/bench/idle-cost.c $(BPFDIR)/voidgate.skel.h \
 	$(CC) $(CFLAGS) -MF t/bench/idle-cost.d -o $@ t/bench/idle-cost.c \
 		$(LDFLAGS)
 
+# What first-SYN drop costs a frame, and its false passes under a flood
+t/bench/syn-cost: t/bench/syn-cost.c $(BPFDIR)/voidgate.skel.h \
+	$(BPFDIR)/voidgate.h
+	$(CC) $(CFLAGS) -MF t/bench/syn-cost.d -o $@ t/bench/syn-cost.c \
+		$(LDFLAGS) -lm
+
 # No bit of first-SYN drop's filter lost to CPUs writing one line at once
 t/bench/syn-bits: t/bench/syn-bits.c $(BPFDIR)/voidgate.skel.h \
 	$(BPFDIR)/voidgate.h
@@ -137,7 +143,7 @@ test: all t/bench/syn-bits
 
 clean:
 	rm -f voidgate voidgatectl t/unit/policy t/unit/cidr t/unit/*.d \
-		t/bench/idle-cost t/bench/syn-bits t/bench/*.d \
+		t/bench/idle-cost t/bench/syn-bits t/bench/syn-cost t/bench/*.d \
 		src/*.o src/*.d \
 		$(BPFDIR)/voidgate.bpf.o $(BPFDIR)/voidgate.bpf.d \
 		$(BPFDIR)/voidgate.skel.h

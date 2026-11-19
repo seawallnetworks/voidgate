@@ -165,12 +165,16 @@ work(void *arg)
 }
 
 
+/* the clock the loaded program reads: coarse, but plain's precise one */
+static clockid_t  gen_clock = CLOCK_MONOTONIC_COARSE;
+
+
 static uint64_t
 gen_now(void)
 {
     struct timespec ts;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(gen_clock, &ts);
 
     return ((uint64_t) ts.tv_sec * 1000000000ULL + ts.tv_nsec)
            / VG_SYN_GEN_NS;
@@ -198,6 +202,7 @@ main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0) {
             plain = 1;
+            gen_clock = CLOCK_MONOTONIC;
 
         } else {
             rounds = atol(argv[i]);

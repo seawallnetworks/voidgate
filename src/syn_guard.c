@@ -24,14 +24,19 @@
 #include <unistd.h>
 
 
-/* past a boundary before clearing: a little, so the clock has moved */
-#define VG_SYN_WAKE_NS  1000000ULL
+/*
+ * Past a boundary before clearing: more than a tick (10 ms at HZ=100), so
+ * the coarse clock BPF reads has moved too. Ahead of BPF, the thread
+ * would clear a slot BPF still reads.
+ */
+#define VG_SYN_WAKE_NS  20000000ULL
 
 
 struct vg_syn {
     struct vg_syn_block  *bloom;
     uint32_t              blocks_log2;
     struct vg_syn_marks  *marks;
+    clockid_t             clock;
     pthread_t             thread;
     pthread_mutex_t       lock;
     pthread_cond_t        cond;
@@ -42,13 +47,14 @@ struct vg_syn {
 
 static void *syn_run(void *arg);
 static void syn_ready(struct vg_syn *s, uint64_t g);
-static uint64_t mono_ns(void);
+static uint64_t syn_gen_now(struct vg_syn *s);
 
 
 /*
  * Does this kernel's verifier take an atomic OR (Linux 5.12, "bpf: Add
- * bitwise atomic instructions")? One before refuses a program that has
- * one anywhere, so voidgate loads the entries without it there.
+ * bitwise atomic instructions"), and bpf_ktime_get_coarse_ns() (5.11),
+ * which the same entries read? One before refuses a program that has an
+ * atomic OR anywhere, so voidgate loads the entries without it there.
  * VG_SYN_ATOMIC=0 takes those anyway, for the tests.
  */
 int
@@ -57,6 +63,7 @@ vg_syn_atomic_probe(void)
     const char *env;
     int fd;
     struct bpf_insn insns[] = {
+        { .code = BPF_JMP | BPF_CALL, .imm = BPF_FUNC_ktime_get_coarse_ns },
         { .code = BPF_ALU64 | BPF_MOV | BPF_K, .dst_reg = BPF_REG_0 },
         { .code = BPF_STX | BPF_DW | BPF_MEM, .dst_reg = BPF_REG_10,
           .src_reg = BPF_REG_0, .off = -8 },
@@ -86,17 +93,14 @@ vg_syn_atomic_probe(void)
 }
 
 
-/* The generation now, as BPF computes it from bpf_ktime_get_ns(). */
-uint64_t
-vg_syn_gen_now(void)
-{
-    return mono_ns() / VG_SYN_GEN_NS;
-}
-
-
+/*
+ * coarse: the atomic entries are loaded, which read the generation from
+ * bpf_ktime_get_coarse_ns(), CLOCK_MONOTONIC_COARSE; the plain ones read
+ * bpf_ktime_get_ns(), CLOCK_MONOTONIC.
+ */
 struct vg_syn *
 vg_syn_start(struct vg_syn_block *bloom, uint32_t blocks_log2,
-    struct vg_syn_marks *marks)
+    struct vg_syn_marks *marks, int coarse)
 {
     pthread_condattr_t ca;
     sigset_t all, old;
@@ -112,6 +116,7 @@ vg_syn_start(struct vg_syn_block *bloom, uint32_t blocks_log2,
     s->bloom = bloom;
     s->blocks_log2 = blocks_log2;
     s->marks = marks;
+    s->clock = coarse ? CLOCK_MONOTONIC_COARSE : CLOCK_MONOTONIC;
 
     /* a slot cleared for no generation: none from the clock is this */
     for (i = 0; i < VG_SYN_SLOTS; i++) {
@@ -207,10 +212,11 @@ syn_run(void *arg)
 
         pthread_mutex_unlock(&s->lock);
 
-        g = vg_syn_gen_now();
+        g = syn_gen_now(s);
         syn_ready(s, g);
         syn_ready(s, g + 1);
 
+        /* the wait on CLOCK_MONOTONIC, never behind the coarse clock */
         next = (g + 1) * VG_SYN_GEN_NS + VG_SYN_WAKE_NS;
         ts.tv_sec = (time_t) (next / 1000000000ULL);
         ts.tv_nsec = (long) (next % 1000000000ULL);
@@ -247,12 +253,14 @@ syn_ready(struct vg_syn *s, uint64_t g)
 }
 
 
+/* The generation now, as BPF computes it from the same clock. */
 static uint64_t
-mono_ns(void)
+syn_gen_now(struct vg_syn *s)
 {
     struct timespec ts;
 
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(s->clock, &ts);
 
-    return (uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec;
+    return ((uint64_t) ts.tv_sec * 1000000000ULL + (uint64_t) ts.tv_nsec)
+           / VG_SYN_GEN_NS;
 }

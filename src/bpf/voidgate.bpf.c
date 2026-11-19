@@ -29,8 +29,9 @@
  * and voidgate_tc, at TC ingress when another program holds the XDP hook.
  * Each has a twin, voidgate_xdp_pl and voidgate_tc_pl, that sets the
  * Bloom filter's bits with a plain write, for a kernel before 5.12, whose
- * verifier refuses an atomic OR even where it is never run. The loader
- * loads one of the four.
+ * verifier refuses an atomic OR even where it is never run, and reads
+ * bpf_ktime_get_ns(), not the coarse clock (5.11+). The loader loads one
+ * of the four.
  */
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
@@ -383,7 +384,15 @@ syn_filter(__u64 h, int atomic)
         return VG_SYN_UNREADY;
     }
 
-    g = bpf_ktime_get_ns() / VG_SYN_GEN_NS;
+    /*
+     * The coarse clock with the atomic variant (5.12+, so it has the
+     * helper, 5.11+): a read from memory, where bpf_ktime_get_ns() reads
+     * the clocksource, about 13 us a call with HPET, as on a VM whose TSC
+     * is unstable. A tick's resolution is ample for 0.9 s generations;
+     * the userspace thread reads the same clock (syn_guard.c).
+     */
+    g = (atomic ? bpf_ktime_get_coarse_ns() : bpf_ktime_get_ns())
+        / VG_SYN_GEN_NS;
 
     slot = syn_slot(g);
 

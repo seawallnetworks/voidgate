@@ -4,6 +4,7 @@ t/unit/policy
 t/unit/cidr
 t/bench/idle-cost
 t/bench/syn-bits
+t/bench/syn-cost
 *.o
 *.d
 *~

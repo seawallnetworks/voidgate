@@ -87,7 +87,8 @@ struct vg_cfg {
 
 /*
  * First-SYN drop's generational Bloom filter (Seawall proposal 0023 §2).
- * A generation is VG_SYN_GEN_NS of bpf_ktime_get_ns(), CLOCK_MONOTONIC;
+ * A generation is VG_SYN_GEN_NS of bpf_ktime_get_coarse_ns(),
+ * CLOCK_MONOTONIC_COARSE (bpf_ktime_get_ns() in the plain entries);
  * generation g lives in slot g % VG_SYN_SLOTS, and a SYN is looked up in
  * the current one and VG_SYN_OLDER before it. One 64-byte block, a cache
  * line, is one element of syn_bloom: slot * blocks + block.

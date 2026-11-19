@@ -128,7 +128,8 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
 
     if (!m->syn_atomic) {
         sw_log_info("no atomic OR in BPF (Linux 5.12): first-SYN drop "
-                    "sets its bits with plain writes");
+                    "sets its bits with plain writes, and reads the "
+                    "precise clock");
     }
 
     m->ncpus = libbpf_num_possible_cpus();
@@ -857,7 +858,8 @@ vg_syn_open(struct vg_maps *m, const struct vg_config *cfg)
 
     m->syn_marks = p;
     m->syn = vg_syn_start(m->syn_bloom, (uint32_t) cfg->syn_guard_bits
-                                        - VG_SYN_BLOCK_LOG2, m->syn_marks);
+                                        - VG_SYN_BLOCK_LOG2, m->syn_marks,
+                        m->syn_atomic);
 
     if (m->syn == NULL) {
         syn_close(m);

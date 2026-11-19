@@ -116,6 +116,7 @@ Everything test-related lives under `t/`. `t/bin/run` runs `t/*.t`, or
 | `integration/coexist.sh` | sharing the XDP hook: libxdp's dispatcher, TC when another program holds it, leftovers of a killed daemon; skips without clang + xdp-tools |
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
 | `bench/syn-bits.c` | no bit of the filter lost when every CPU writes one cache line at once, by `BPF_PROG_TEST_RUN`; `-p`, the plain writes, shows the race is real. Run by `make test` |
+| `bench/syn-cost.c` | ns a SYN of first-SYN drop, warm and with the filter cold under floods of 100k to 10M spoofed SYNs a second, and the share that pass against `syn_guard_fp_est`'s model, by `BPF_PROG_TEST_RUN`: `make t/bench/syn-cost && sudo t/bench/syn-cost` |
 | `bench/idle-cost.c` | ns a frame of the XDP program, idle and armed, with and without sw_flowd's table, by `BPF_PROG_TEST_RUN`: `make t/bench/idle-cost && sudo t/bench/idle-cost` |
 
 `make test` runs `t/unit/policy`, `t/unit/cidr` and `t/unit/syn-plain.sh`,
