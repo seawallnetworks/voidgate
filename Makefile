@@ -51,7 +51,7 @@ BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(ARCH) \
 	$(if $(MULTIARCH),-isystem /usr/include/$(MULTIARCH))
 
 USER_OBJS := src/voidgate.o src/config.o src/policy.o src/maps.o src/ipaddr.o \
-	src/ctl_server.o src/http.o src/log.o
+	src/ctl_server.o src/http.o src/log.o src/syn_guard.o
 CTL_OBJS  := src/voidgatectl.o
 
 .PHONY: all clean install install-lua uninstall test
@@ -90,7 +90,8 @@ src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 voidgate: $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A)
-	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(USER_OBJS) $(LIBSW_BPF_A) $(LIBSW_A) $(LDFLAGS) \
+		-pthread
 
 voidgatectl: $(CTL_OBJS) $(LIBSW_A)
 	$(CC) $(CFLAGS) -o $@ $(CTL_OBJS) $(LIBSW_A)
@@ -113,19 +114,30 @@ t/bench/idle-cost: t/bench/idle-cost.c $(BPFDIR)/voidgate.skel.h \
 	$(CC) $(CFLAGS) -MF t/bench/idle-cost.d -o $@ t/bench/idle-cost.c \
 		$(LDFLAGS)
 
+# No bit of first-SYN drop's filter lost to CPUs writing one line at once
+t/bench/syn-bits: t/bench/syn-bits.c $(BPFDIR)/voidgate.skel.h \
+	$(BPFDIR)/voidgate.h
+	$(CC) $(CFLAGS) -MF t/bench/syn-bits.d -o $@ t/bench/syn-bits.c \
+		$(LDFLAGS) -pthread
+
 # Unit tests, then verdicts: real daemon + t/*.t (needs root), once for
 # each hook, so XDP and TC judge the same frames alike.
-test: all
+test: all t/bench/syn-bits
 	./t/unit/policy
 	./t/unit/cidr
 	./t/unit/voidgatectl.sh
+	./t/unit/syn-plain.sh
 	sudo t/bin/run
 	sudo VG_HOOK=tc t/bin/run
 	sudo VG_HOOK=tc SW_NO_TCX=1 t/bin/run
+	sudo VG_FIXTURE=syn t/bin/run
+	sudo VG_FIXTURE=syn VG_SYN_ATOMIC=0 t/bin/run
+	sudo VG_FIXTURE=syn VG_HOOK=tc t/bin/run
+	sudo t/bench/syn-bits
 
 clean:
 	rm -f voidgate voidgatectl t/unit/policy t/unit/cidr t/unit/*.d \
-		t/bench/idle-cost t/bench/*.d \
+		t/bench/idle-cost t/bench/syn-bits t/bench/*.d \
 		src/*.o src/*.d \
 		$(BPFDIR)/voidgate.bpf.o $(BPFDIR)/voidgate.bpf.d \
 		$(BPFDIR)/voidgate.skel.h

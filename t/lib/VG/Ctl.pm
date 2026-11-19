@@ -10,7 +10,7 @@ use Carp qw(croak);
 use IO::Socket::UNIX;
 use Socket qw(SOCK_STREAM);
 
-our @EXPORT_OK = qw(ctl stats);
+our @EXPORT_OK = qw(ctl stats status);
 use Exporter 'import';
 
 our $PATH = '/run/voidgate.sock';
@@ -27,6 +27,11 @@ sub ctl {
     my $reply = <$s>;
     close $s;
     return $reply // '';
+}
+
+
+sub status {
+    return ctl('status');
 }
 
 

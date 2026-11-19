@@ -149,13 +149,16 @@ ctl_status(struct vg_ctrl *ctrl, const char *args, char *reply,
     n += snprintf(reply + n, reply_size - n,
              "state=%s armed=%d rx_pps=%.0f rx_bps=%.0f "
              "wake_rx_pps=%.0f wake_rx_bps=%.0f "
-             "blocked=%d degraded=%d iface=%s hook=%s flows=%s",
+             "blocked=%d degraded=%d iface=%s hook=%s flows=%s "
+             "syn_guard=%s",
              ctrl->state == VG_ACTIVE ? "active" : "idle",
              ctrl->state == VG_ACTIVE, ctrl->rx_pps, ctrl->rx_bps,
              ctrl->wake_rx_pps, ctrl->wake_rx_bps,
              ctrl->drop_count, ctrl->maps->degraded,
              ctrl->cfg->interface, vg_hook_name(ctrl->maps),
-             ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none");
+             ctrl->maps->flows_fd >= 0 ? "sw_flowd" : "none",
+             ctrl->maps->syn == NULL ? "off"
+             : ctrl->syn_engaged ? "engaged" : "standby");
 
     /* the words of Seawall proposal 0017 §2, on the same line */
     if (n > 0 && (size_t) n < reply_size) {
@@ -222,7 +225,9 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
     snprintf(reply, reply_size,
              "rx_pkts=%llu rx_bytes=%llu passed=%llu dropped=%llu "
              "non_ip=%llu map_full=%llu parse_err=%llu reply_passed=%llu "
-             "rx_reply_pkts=%llu rx_reply_bytes=%llu\n",
+             "rx_reply_pkts=%llu rx_reply_bytes=%llu syn_unproven=%llu "
+             "syn_guard_dropped=%llu syn_guard_retrans=%llu "
+             "syn_guard_unready=%llu\n",
              (unsigned long long) m.rx_pkts,
              (unsigned long long) m.rx_bytes,
              (unsigned long long) m.passed,
@@ -232,7 +237,11 @@ ctl_stats(struct vg_ctrl *ctrl, const char *args, char *reply,
              (unsigned long long) m.parse_err,
              (unsigned long long) m.reply_passed,
              (unsigned long long) m.rx_reply_pkts,
-             (unsigned long long) m.rx_reply_bytes);
+             (unsigned long long) m.rx_reply_bytes,
+             (unsigned long long) m.syn_unproven,
+             (unsigned long long) m.syn_guard_dropped,
+             (unsigned long long) m.syn_guard_retrans,
+             (unsigned long long) m.syn_guard_unready);
 }
 
 
@@ -356,6 +365,7 @@ parse_ttl(const char *s, uint32_t *out)
 static int
 vg_ctrl_reload(struct vg_ctrl *c)
 {
+    int                    syn_guard, syn_bits;
     uint32_t               rsz, dsz;
     struct vg_config       n;
     char                   iface[VG_MAX_IFACE];
@@ -375,6 +385,8 @@ vg_ctrl_reload(struct vg_ctrl *c)
     snprintf(pid_file, sizeof(pid_file), "%s", c->cfg->pid_file);
     rsz = c->cfg->remote_map_size;
     dsz = c->cfg->drop_map_size;
+    syn_guard = c->cfg->syn_guard;
+    syn_bits = c->cfg->syn_guard_bits;
 
     if (vg_config_load(c->cfg_path, &n) < 0) {
         return -1;
@@ -387,6 +399,15 @@ vg_ctrl_reload(struct vg_ctrl *c)
     snprintf(n.pid_file, sizeof(n.pid_file), "%s", pid_file);
     n.remote_map_size = rsz;
     n.drop_map_size = dsz;
+
+    /* the filter's thread and size are the start's */
+    if (n.syn_guard != syn_guard || n.syn_guard_bits != syn_bits) {
+        sw_log_warn("reload: syn_guard and syn_guard_bits take effect "
+                    "at restart");
+    }
+
+    n.syn_guard = syn_guard;
+    n.syn_guard_bits = syn_bits;
 
     if (c->iface_override[0]) {
         snprintf(n.interface, sizeof(n.interface), "%s", c->iface_override);
@@ -403,7 +424,9 @@ vg_ctrl_reload(struct vg_ctrl *c)
      */
     vg_ctrl_prune_protected(c);
 
-    if (vg_cfg_commit(c->maps, c->state == VG_ACTIVE, c->cfg) < 0) {
+    if (vg_cfg_commit(c->maps, c->state == VG_ACTIVE, c->syn_engaged,
+                      c->cfg) < 0)
+    {
         return -1;
     }
 

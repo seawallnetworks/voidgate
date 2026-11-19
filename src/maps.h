@@ -13,6 +13,7 @@
 
 struct voidgate_bpf;
 struct xdp_program;
+struct vg_syn;
 
 enum vg_hook {
     VG_HOOK_NONE = 0,
@@ -42,6 +43,15 @@ struct vg_maps {
     char                  flows_problem[128];
     /* what to do about it: it depends on what it is */
     const char           *flows_fix;
+    /* first-SYN drop (Seawall proposal 0023): the entries with atomic
+     * OR, else the _pl ones; the filter's maps through mmap, and the
+     * thread that clears them; NULL with syn_guard = no
+     */
+    int                   syn_atomic;
+    struct vg_syn_block  *syn_bloom;
+    size_t                syn_bloom_len;
+    struct vg_syn_marks  *syn_marks;
+    struct vg_syn        *syn;
 };
 
 
@@ -51,8 +61,9 @@ int vg_attach(struct vg_maps *m, const struct vg_config *cfg);
 void vg_detach(struct vg_maps *m);
 const char *vg_hook_name(const struct vg_maps *m);
 
-int vg_cfg_commit(struct vg_maps *m, uint32_t armed,
+int vg_cfg_commit(struct vg_maps *m, uint32_t armed, uint32_t syn_engaged,
     const struct vg_config *cfg);
+int vg_syn_open(struct vg_maps *m, const struct vg_config *cfg);
 
 int vg_metrics_read(struct vg_maps *m, struct vg_metrics *out);
 int vg_sum_percpu(struct vg_maps *m, int map_fd, const void *key,

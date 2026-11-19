@@ -135,6 +135,13 @@ struct vg_ctrl {
                                                the quiet time compare */
     double                  wake_rx_bps;
     time_t                  quiet_since;
+    /* first-SYN drop (Seawall proposal 0023 §1): engaged while SYNs
+     * from unproven addresses alone are over wake_pps, until
+     * clear_seconds below it, or the disarm
+     */
+    int                     syn_engaged;
+    double                  syn_pps;        /* syn_unproven, last tick */
+    time_t                  syn_quiet_since;
     struct vg_drop_rec     *drop_pool;      /* 2 x drop_map_size (v4 + v6) */
     unsigned                drop_pool_cap;
     unsigned                drop_used;      /* pool records ever handed out */

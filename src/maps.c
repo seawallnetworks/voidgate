@@ -3,6 +3,7 @@
 
 #include "maps.h"
 #include "log.h"
+#include "syn_guard.h"
 
 #include "bpf/voidgate.skel.h"
 
@@ -18,6 +19,8 @@
 #include <net/if.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/resource.h>
 #include <unistd.h>
 
@@ -30,7 +33,9 @@
 #define VG_TC_HANDLE  0x5647  /* "VG" */
 #define VG_TC_PRIORITY  0x0100
 
+/* the entries with atomic OR, and without, for a kernel before 5.12 */
 #define VG_XDP_PROG  "voidgate_xdp"
+#define VG_XDP_PROG_PL  "voidgate_xdp_pl"
 
 /* xdp_claim(): what holds the XDP hook */
 #define VG_XDP_FREE  0
@@ -57,6 +62,11 @@ static int lpm_update(int fd, const struct vg_cidr *p, const void *val);
 static int lpm_delete(int fd, const struct vg_cidr *p);
 static int flush_lpm(int fd, int v6);
 static void flows_open(struct vg_maps *m);
+static struct bpf_program *xdp_prog(const struct vg_maps *m);
+static struct bpf_program *tc_prog(const struct vg_maps *m);
+static void autoload_only(struct vg_maps *m, struct bpf_program *p);
+static int vg_xdp_name(const char *name);
+static void syn_close(struct vg_maps *m);
 
 static void
 bump_memlock(void)
@@ -114,6 +124,13 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
     sw_bpf_log_init();
     sw_bpf_libxdp_log_init();
 
+    m->syn_atomic = vg_syn_atomic_probe();
+
+    if (!m->syn_atomic) {
+        sw_log_info("no atomic OR in BPF (Linux 5.12): first-SYN drop "
+                    "sets its bits with plain writes");
+    }
+
     m->ncpus = libbpf_num_possible_cpus();
 
     if (m->ncpus <= 0) {
@@ -143,11 +160,36 @@ vg_maps_open(struct vg_maps *m, struct vg_config *cfg)
 static int
 skel_open(struct vg_maps *m, const struct vg_config *cfg)
 {
+    uint64_t key[2];
+    uint32_t log2;
+
     m->skel = voidgate_bpf__open();
 
     if (m->skel == NULL) {
         return -1;
     }
+
+    /*
+     * The first-SYN filter (Seawall proposal 0023 §2): VG_SYN_SLOTS slots
+     * of syn_guard_bits each, 64-byte blocks; with syn_guard = no, a
+     * block a slot, which BPF never reads. The hash's key is drawn at
+     * each start.
+     */
+    log2 = cfg->syn_guard ? (uint32_t) cfg->syn_guard_bits - VG_SYN_BLOCK_LOG2
+                          : 0;
+    bpf_map__set_max_entries(m->skel->maps.syn_bloom,
+                             VG_SYN_SLOTS << log2);
+    m->skel->rodata->vg_syn_blocks_log2 = log2;
+
+    if (getrandom(key, sizeof(key), 0) != (ssize_t) sizeof(key)) {
+        sw_log_warn("getrandom: %s", strerror(errno));
+        voidgate_bpf__destroy(m->skel);
+        m->skel = NULL;
+        return -1;
+    }
+
+    m->skel->rodata->vg_syn_k0 = key[0];
+    m->skel->rodata->vg_syn_k1 = key[1];
 
     if (cfg->remote_map_size) {
         bpf_map__set_max_entries(m->skel->maps.remote_v4, cfg->remote_map_size);
@@ -182,7 +224,9 @@ static int
 skel_fresh(struct vg_maps *m, const struct vg_config *cfg)
 {
     if (bpf_program__fd(m->skel->progs.voidgate_xdp) < 0
-        && bpf_program__fd(m->skel->progs.voidgate_tc) < 0)
+        && bpf_program__fd(m->skel->progs.voidgate_tc) < 0
+        && bpf_program__fd(m->skel->progs.voidgate_xdp_pl) < 0
+        && bpf_program__fd(m->skel->progs.voidgate_tc_pl) < 0)
     {
         return 0;
     }
@@ -207,6 +251,7 @@ vg_maps_close(struct vg_maps *m)
     }
 
     vg_detach(m);
+    syn_close(m);
 
     if (m->flows_fd >= 0) {
         close(m->flows_fd);
@@ -448,7 +493,7 @@ xdp_claim(int ifindex, char *holder, size_t len,
                 return VG_XDP_FREE;
             }
 
-            if (strcmp(xdp_program__name(p), VG_XDP_PROG) != 0) {
+            if (!vg_xdp_name(xdp_program__name(p))) {
                 snprintf(holder, len, "%s", xdp_program__name(p));
                 xdp_multiprog__close(mp);
                 return VG_XDP_HELD;
@@ -469,7 +514,7 @@ xdp_claim(int ifindex, char *holder, size_t len,
         for (p = xdp_multiprog__next_prog(NULL, mp); p != NULL;
              p = xdp_multiprog__next_prog(p, mp))
         {
-            if (strcmp(xdp_program__name(p), VG_XDP_PROG) == 0) {
+            if (vg_xdp_name(xdp_program__name(p))) {
                 break;
             }
         }
@@ -502,7 +547,8 @@ attach_xdp(struct vg_maps *m, const struct vg_config *cfg,
     enum xdp_attach_mode mode)
 {
     DECLARE_LIBXDP_OPTS(xdp_program_opts, opts,
-                        .prog_name = VG_XDP_PROG);
+                        .prog_name = m->syn_atomic ? VG_XDP_PROG
+                                                   : VG_XDP_PROG_PL);
     struct xdp_multiprog *mp;
     struct xdp_program *xp;
     long err;
@@ -512,7 +558,7 @@ attach_xdp(struct vg_maps *m, const struct vg_config *cfg,
     }
 
     opts.obj = m->skel->obj;
-    bpf_program__set_autoload(m->skel->progs.voidgate_tc, false);
+    autoload_only(m, xdp_prog(m));
 
     xp = xdp_program__create(&opts);
     err = libxdp_get_error(xp);
@@ -578,8 +624,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
         return -1;
     }
 
-    bpf_program__set_autoload(m->skel->progs.voidgate_xdp, false);
-    bpf_program__set_autoload(m->skel->progs.voidgate_tc, true);
+    autoload_only(m, tc_prog(m));
 
     err = voidgate_bpf__load(m->skel);
 
@@ -588,7 +633,7 @@ attach_tc(struct vg_maps *m, const struct vg_config *cfg)
         return -1;
     }
 
-    prog_fd = bpf_program__fd(m->skel->progs.voidgate_tc);
+    prog_fd = bpf_program__fd(tc_prog(m));
 
     if (sw_bpf_have_tcx()) {
         /* first: ahead of mini-fw, which appends */
@@ -733,7 +778,7 @@ vg_remote_foreach(struct vg_maps *m, uint32_t budget, vg_remote_pt fn,
 
 
 int
-vg_cfg_commit(struct vg_maps *m, uint32_t armed,
+vg_cfg_commit(struct vg_maps *m, uint32_t armed, uint32_t syn_engaged,
     const struct vg_config *cfg)
 {
     __u32 key = 0;
@@ -743,6 +788,8 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
     memset(&bc, 0, sizeof(bc));
     bc.armed = armed;
     bc.flows = m->flows_fd >= 0;
+    bc.syn_guard = m->syn != NULL;
+    bc.syn_engaged = bc.syn_guard && armed && syn_engaged;
 
     if (cfg != NULL) {
         bc.allow_port_count = (uint16_t) cfg->allow_port_count;
@@ -761,7 +808,126 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
 
     fd = bpf_map__fd(m->skel->maps.cfg);
 
-    return bpf_map_update_elem(fd, &key, &bc, BPF_ANY);
+    if (bpf_map_update_elem(fd, &key, &bc, BPF_ANY) < 0) {
+        return -1;
+    }
+
+    /* the slots are cleared while armed, never idle */
+    vg_syn_armed(m->syn, (int) armed);
+
+    return 0;
+}
+
+
+/*
+ * After the load: the first-SYN filter's maps through mmap, and the
+ * thread that clears them (Seawall proposal 0023 §2). Without them,
+ * syn_guard reads off in BPF, and SYNs are counted as before it.
+ */
+int
+vg_syn_open(struct vg_maps *m, const struct vg_config *cfg)
+{
+    struct bpf_map *bloom = m->skel->maps.syn_bloom;
+    void *p;
+
+    if (!cfg->syn_guard) {
+        return 0;
+    }
+
+    m->syn_bloom_len = (size_t) bpf_map__max_entries(bloom)
+                       * sizeof(struct vg_syn_block);
+    p = mmap(NULL, m->syn_bloom_len, PROT_READ | PROT_WRITE, MAP_SHARED,
+             bpf_map__fd(bloom), 0);
+
+    if (p == MAP_FAILED) {
+        sw_log_warn("syn_guard: mmap syn_bloom: %s", strerror(errno));
+        return -1;
+    }
+
+    m->syn_bloom = p;
+
+    p = mmap(NULL, sizeof(struct vg_syn_marks), PROT_READ | PROT_WRITE,
+             MAP_SHARED, bpf_map__fd(m->skel->maps.syn_marks), 0);
+
+    if (p == MAP_FAILED) {
+        sw_log_warn("syn_guard: mmap syn_marks: %s", strerror(errno));
+        syn_close(m);
+        return -1;
+    }
+
+    m->syn_marks = p;
+    m->syn = vg_syn_start(m->syn_bloom, (uint32_t) cfg->syn_guard_bits
+                                        - VG_SYN_BLOCK_LOG2, m->syn_marks);
+
+    if (m->syn == NULL) {
+        syn_close(m);
+        return -1;
+    }
+
+    sw_log_info("syn_guard: %zu MB of first-SYN filter, %s",
+                m->syn_bloom_len >> 20,
+                m->syn_atomic ? "atomic OR" : "plain writes");
+
+    return 0;
+}
+
+
+static void
+syn_close(struct vg_maps *m)
+{
+    vg_syn_stop(m->syn);
+    m->syn = NULL;
+
+    if (m->syn_marks != NULL) {
+        munmap(m->syn_marks, sizeof(struct vg_syn_marks));
+        m->syn_marks = NULL;
+    }
+
+    if (m->syn_bloom != NULL) {
+        munmap(m->syn_bloom, m->syn_bloom_len);
+        m->syn_bloom = NULL;
+    }
+}
+
+
+static struct bpf_program *
+xdp_prog(const struct vg_maps *m)
+{
+    return m->syn_atomic ? m->skel->progs.voidgate_xdp
+                         : m->skel->progs.voidgate_xdp_pl;
+}
+
+
+static struct bpf_program *
+tc_prog(const struct vg_maps *m)
+{
+    return m->syn_atomic ? m->skel->progs.voidgate_tc
+                         : m->skel->progs.voidgate_tc_pl;
+}
+
+
+/* p alone of the four entries is loaded */
+static void
+autoload_only(struct vg_maps *m, struct bpf_program *p)
+{
+    struct bpf_program *e[] = {
+        m->skel->progs.voidgate_xdp, m->skel->progs.voidgate_xdp_pl,
+        m->skel->progs.voidgate_tc, m->skel->progs.voidgate_tc_pl,
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(e) / sizeof(e[0]); i++) {
+        bpf_program__set_autoload(e[i], e[i] == p);
+    }
+}
+
+
+/* voidgate's XDP entry, either one */
+static int
+vg_xdp_name(const char *name)
+{
+    return strcmp(name, VG_XDP_PROG) == 0
+           || strcmp(name, VG_XDP_PROG_PL) == 0;
 }
 
 

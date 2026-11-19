@@ -57,6 +57,7 @@ static void feed_block(struct vg_ctrl *c, int kind, const char *cause,
 static uint64_t now_ms(void);
 static void attack_start(struct vg_ctrl *c);
 static void attack_end(struct vg_ctrl *c, int how, uint64_t end_ms);
+static void syn_engage(struct vg_ctrl *c);
 
 
 static unsigned
@@ -831,7 +832,7 @@ vg_ctrl_arm(struct vg_ctrl *c, const char *why)
     snap_clear(c);
     c->quiet_since = 0;
 
-    if (vg_cfg_commit(c->maps, 1, c->cfg) < 0) {
+    if (vg_cfg_commit(c->maps, 1, 0, c->cfg) < 0) {
         sw_log_warn("arm cfg commit failed: %s", strerror(errno));
         return -1;
     }
@@ -860,9 +861,14 @@ vg_ctrl_disarm(struct vg_ctrl *c, const char *why)
 {
     log_drops(c);
 
-    if (vg_cfg_commit(c->maps, 0, c->cfg) < 0) {
+    if (vg_cfg_commit(c->maps, 0, 0, c->cfg) < 0) {
         sw_log_warn("disarm cfg commit failed: %s", strerror(errno));
         return -1;
+    }
+
+    if (c->syn_engaged) {
+        c->syn_engaged = 0;
+        sw_log_info("syn_guard: standby (disarmed)");
     }
 
     vg_drop_flush(c->maps);
@@ -1242,6 +1248,8 @@ vg_ctrl_tick(struct vg_ctrl *c)
                        ? m.rx_reply_pkts - c->last_m.rx_reply_pkts : 0;
         uint64_t drb = m.rx_reply_bytes >= c->last_m.rx_reply_bytes
                        ? m.rx_reply_bytes - c->last_m.rx_reply_bytes : 0;
+        uint64_t dsyn = m.syn_unproven >= c->last_m.syn_unproven
+                        ? m.syn_unproven - c->last_m.syn_unproven : 0;
 
         c->rx_pps = (double) dp / dt;
         c->rx_bps = (double) db * 8.0 / dt;
@@ -1252,6 +1260,7 @@ vg_ctrl_tick(struct vg_ctrl *c)
          */
         c->wake_rx_pps = (double) (dp > drp ? dp - drp : 0) / dt;
         c->wake_rx_bps = (double) (db > drb ? db - drb : 0) * 8.0 / dt;
+        c->syn_pps = (double) dsyn / dt;
     }
 
     c->last_m = m;
@@ -1280,6 +1289,7 @@ vg_ctrl_tick(struct vg_ctrl *c)
 
     walk_remotes(c, dt);
     expire_drops(c);
+    syn_engage(c);
 
     sw_log_debug("tick %-6s rx(pps)=%-8.0f rx(Mbps)=%-6.1f "
                  "wake_rx(pps)=%-8.0f dropped(pps)=%-8.0f blocked=%d",
@@ -1333,6 +1343,59 @@ vg_ctrl_tick(struct vg_ctrl *c)
     }
 
     return 0;
+}
+
+
+/*
+ * First-SYN drop engages when SYNs from unproven addresses alone, counted
+ * before the filter, were over wake_pps on the last tick, whatever armed
+ * the gate; it returns to standby after clear_seconds below it (Seawall
+ * proposal 0023 §1). Counted before the filter, its own drops keep it
+ * engaged, so it doesn't go back and forth.
+ */
+static void
+syn_engage(struct vg_ctrl *c)
+{
+    time_t now = time(NULL);
+    int on = c->syn_engaged;
+
+    if (c->maps == NULL || c->maps->syn == NULL) {
+        return;
+    }
+
+    if (c->syn_pps > (double) c->cfg->wake_pps) {
+        c->syn_quiet_since = 0;
+        on = 1;
+
+    } else if (on) {
+        if (c->syn_quiet_since == 0) {
+            c->syn_quiet_since = now;
+        }
+
+        if (now - c->syn_quiet_since >= c->cfg->clear_seconds) {
+            on = 0;
+        }
+    }
+
+    if (on == c->syn_engaged) {
+        return;
+    }
+
+    if (vg_cfg_commit(c->maps, 1, (uint32_t) on, c->cfg) < 0) {
+        sw_log_warn("syn_guard cfg commit failed: %s", strerror(errno));
+        return;
+    }
+
+    c->syn_engaged = on;
+    c->syn_quiet_since = 0;
+
+    if (on) {
+        sw_log_info("syn_guard: engaged, %.0f SYNs/s from unproven "
+                    "addresses", c->syn_pps);
+
+    } else {
+        sw_log_info("syn_guard: standby");
+    }
 }
 
 

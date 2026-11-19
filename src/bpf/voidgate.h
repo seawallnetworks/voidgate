@@ -59,6 +59,15 @@ struct vg_metrics {
                                rx less these is what wakes the gate
                                (Seawall proposal 0017 §1) */
     __u64  rx_reply_bytes;  /* L2 bytes of rx_reply_pkts */
+    /* first-SYN drop (Seawall proposal 0023), syn_guard = yes, armed */
+    __u64  syn_unproven;    /* SYNs from unproven addresses, before the
+                               filter, engaged or not; not those the drop
+                               LPM drops first. What engages it */
+    __u64  syn_guard_dropped;  /* first SYNs dropped */
+    __u64  syn_guard_retrans;  /* found in an older generation: passed
+                                  on to the checks after it */
+    __u64  syn_guard_unready;  /* the current slot not cleared in time:
+                                  passed on unfiltered */
 };
 
 
@@ -69,6 +78,41 @@ struct vg_cfg {
     __u64  reply_idle_ns;  /* a flow idle longer is not looked up */
     __u32  flows;          /* sw_flowd's table is bound: replies are
                               looked up, idle too */
+    __u32  syn_guard;      /* syn_guard = yes: pure SYNs aren't counted
+                              against their source, and are counted in
+                              syn_unproven */
+    __u32  syn_engaged;    /* first-SYN drop drops: userspace decides */
+};
+
+
+/*
+ * First-SYN drop's generational Bloom filter (Seawall proposal 0023 §2).
+ * A generation is VG_SYN_GEN_NS of bpf_ktime_get_ns(), CLOCK_MONOTONIC;
+ * generation g lives in slot g % VG_SYN_SLOTS, and a SYN is looked up in
+ * the current one and VG_SYN_OLDER before it. One 64-byte block, a cache
+ * line, is one element of syn_bloom: slot * blocks + block.
+ */
+#define VG_SYN_GEN_NS  900000000ULL
+#define VG_SYN_OLDER  4
+#define VG_SYN_SLOTS  6
+#define VG_SYN_BLOCK_BITS  512
+#define VG_SYN_BLOCK_LOG2  9
+#define VG_SYN_BITS_MIN  23
+#define VG_SYN_BITS_MAX  28
+/* a slot no generation has been cleared into: never one from the clock */
+#define VG_SYN_MARK_NONE  ((__u64) -1)
+
+
+struct vg_syn_block {
+    __u64  w[VG_SYN_BLOCK_BITS / 64];
+};
+
+
+/* syn_marks' one element: the generation each slot was cleared for.
+ * Written by userspace alone, through mmap, with release.
+ */
+struct vg_syn_marks {
+    __u64  gen[8];          /* VG_SYN_SLOTS used: one cache line */
 };
 
 

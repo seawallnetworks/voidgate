@@ -6,8 +6,11 @@
 #   ipv4 frag 203.0.113.1 > 198.51.100.10 off=8
 #   ipv6 tcp [2001:db8::bad]:40000 > [2001:db8::10]:22 ext=hopopts,dstopts*8
 #   ipv6 icmpv6 fe80::1 > ff02::1 type=135 hop=255
+#   ipv4 tcp 203.0.113.1:40000 > 198.51.100.10:80 seq=7 flags=SA
 #   ... set@55=255
 #
+# TCP is a SYN with sequence number 0 unless seq= and flags= (letters of
+# FSRPAU) say otherwise.
 # ext= lists IPv6 extension headers in wire order; frag:N sets the raw
 # frag_off field. set@I=V patches frame byte I after the frame is built.
 
@@ -32,6 +35,9 @@ use constant {
     PROTO_UDP    => 17,
     PROTO_ICMPV6 => 58,
 };
+
+my %TCP_FLAG = (F => 0x01, S => 0x02, R => 0x04, P => 0x08, A => 0x10,
+                U => 0x20);
 
 my %EXT = (
     hopopts => 0,
@@ -89,9 +95,16 @@ sub _l4 {
     my ($proto, $sport, $dport, $opt) = @_;
 
     if ($proto eq 'tcp') {
+        my $flags = 0;
+
+        for (split //, $opt->{flags} // 'S') {
+            croak "unknown TCP flag '$_'" unless exists $TCP_FLAG{$_};
+            $flags |= $TCP_FLAG{$_};
+        }
+
         return (PROTO_TCP,
-                pack('n n N N C C n n n', $sport, $dport, 0, 0, 5 << 4, 0x02,
-                     0, 0, 0));
+                pack('n n N N C C n n n', $sport, $dport, $opt->{seq} // 0, 0,
+                     5 << 4, $flags, 0, 0, 0));
     }
 
     if ($proto eq 'udp') {

@@ -30,6 +30,7 @@ static void test_feed(void);
 static void test_feed_wrap(void);
 static void test_feed_ban(void);
 static void test_wake_replies(void);
+static void test_syn_engage(void);
 static void test_attacks(void);
 static void test_blocks_pages(void);
 static struct vg_cidr v4(int a, int b, int c, int d, int len);
@@ -45,6 +46,7 @@ static int deleted_count;
 static int del_fail;        /* vg_drop_del fails with EIO */
 static int add_fail;        /* vg_drop_add fails with ENOSPC */
 static int commit_fail;     /* vg_cfg_commit fails with EIO */
+static uint32_t committed_engaged = 2;  /* vg_cfg_commit's last */
 static int complete_scan = 1;
 static int nitems;
 static struct {
@@ -90,7 +92,7 @@ vg_drop_add(struct vg_maps *m, const struct vg_cidr *p, uint32_t reason,
 
 
 int
-vg_cfg_commit(struct vg_maps *m, uint32_t armed,
+vg_cfg_commit(struct vg_maps *m, uint32_t armed, uint32_t syn_engaged,
     const struct vg_config *cfg)
 {
     (void) m;
@@ -101,6 +103,8 @@ vg_cfg_commit(struct vg_maps *m, uint32_t armed,
         errno = EIO;
         return -1;
     }
+
+    committed_engaged = syn_engaged;
 
     return 0;
 }
@@ -1044,6 +1048,88 @@ test_wake_replies(void)
 }
 
 
+/*
+ * First-SYN drop (Seawall proposal 0023 §1): engaged on a tick of SYNs
+ * from unproven addresses over wake_pps, whatever armed the gate; kept so
+ * while they are; standby after clear_seconds below it, or on a disarm;
+ * never with syn_guard off (no filter thread).
+ */
+static void
+test_syn_engage(void)
+{
+    struct vg_config  cfg;
+    struct vg_maps    maps;
+    struct vg_ctrl    c;
+
+    vg_config_defaults(&cfg);
+    cfg.remote_map_size = 16;
+    cfg.wake_pps = 2000;
+    cfg.wake_mbps = 1000;
+    cfg.clear_seconds = 1000;
+    nitems = 0;
+    complete_scan = 1;
+    memset(&maps, 0, sizeof(maps));
+    maps.syn = (struct vg_syn *) &maps;     /* never dereferenced here */
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+    assert(vg_ctrl_init(&c, &cfg, &maps, NULL, NULL) == 0);
+    c.last_m = stub_metrics;
+
+    /* a UDP flood arms the gate; standby */
+    wake_tick(&c, 5000, 0);
+    assert(c.state == VG_ACTIVE && !c.syn_engaged);
+    wake_tick(&c, 5000, 0);
+    assert(!c.syn_engaged);
+
+    /* SYNs alone under wake_pps: standby */
+    stub_metrics.syn_unproven += 1500;
+    wake_tick(&c, 5000, 0);
+    assert(!c.syn_engaged);
+
+    /* over: engaged, committed */
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_engaged && committed_engaged == 1);
+
+    /* below, inside clear_seconds: still engaged */
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_engaged && c.syn_quiet_since != 0);
+
+    /* over again: the quiet time starts over */
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_engaged && c.syn_quiet_since == 0);
+
+    /* below for clear_seconds: standby, committed */
+    cfg.clear_seconds = 0;
+    wake_tick(&c, 5000, 0);
+    assert(!c.syn_engaged && committed_engaged == 0);
+
+    /* a failed commit changes nothing */
+    stub_metrics.syn_unproven += 2500;
+    commit_fail = 1;
+    wake_tick(&c, 5000, 0);
+    assert(!c.syn_engaged);
+    commit_fail = 0;
+
+    /* engaged; a disarm returns it to standby */
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(c.syn_engaged);
+    assert(vg_ctrl_disarm(&c, "test") == 0);
+    assert(!c.syn_engaged && committed_engaged == 0);
+
+    /* syn_guard off: no filter thread, never engaged */
+    maps.syn = NULL;
+    assert(vg_ctrl_arm(&c, "test") == 0);
+    stub_metrics.syn_unproven += 2500;
+    wake_tick(&c, 5000, 0);
+    assert(!c.syn_engaged);
+
+    vg_ctrl_free(&c);
+    memset(&stub_metrics, 0, sizeof(stub_metrics));
+}
+
+
 /* The feed's entry seq, which must be of this kind. */
 static const struct vg_feed_entry *
 feed_kind(struct vg_ctrl *c, uint64_t seq, int kind)
@@ -1439,6 +1525,7 @@ main(void)
     test_feed_wrap();
     test_feed_ban();
     test_wake_replies();
+    test_syn_engage();
     test_attacks();
     test_blocks_pages();
     puts("control-plane regression tests passed");

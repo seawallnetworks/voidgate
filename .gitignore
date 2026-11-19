@@ -3,6 +3,7 @@ voidgatectl
 t/unit/policy
 t/unit/cidr
 t/bench/idle-cost
+t/bench/syn-bits
 *.o
 *.d
 *~

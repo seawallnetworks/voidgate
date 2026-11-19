@@ -98,5 +98,9 @@ vg_log_config(const struct vg_config *cfg, const char *hook)
     sw_log_debug("  ├─ remote_map_size = %u", cfg->remote_map_size);
     sw_log_debug("  ├─ drop_map_size = %u", cfg->drop_map_size);
     sw_log_debug("  ├─ reply_idle_seconds = %d", cfg->reply_idle_seconds);
+    sw_log_debug("  ├─ syn_guard = %s", cfg->syn_guard ? "yes" : "no");
+    sw_log_debug("  ├─ syn_guard_bits = %d", cfg->syn_guard_bits);
+    sw_log_debug("  ├─ syn_guard_proven_rate = %u",
+                 cfg->syn_guard_proven_rate);
     sw_log_debug("  └─ metrics_port = %d", cfg->metrics_port);
 }

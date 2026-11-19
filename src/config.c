@@ -16,7 +16,7 @@
 #include <string.h>
 
 
-enum cfg_kind { CFG_STR, CFG_U64, CFG_I32, CFG_U32 };
+enum cfg_kind { CFG_STR, CFG_U64, CFG_I32, CFG_U32, CFG_BOOL };
 
 
 struct cfg_scalar {
@@ -73,6 +73,9 @@ static const struct cfg_scalar scalars[] = {
     { "remote_map_size", CFG_U32, CFG_OFF(remote_map_size), 0 },
     { "drop_map_size", CFG_U32, CFG_OFF(drop_map_size), 0 },
     { "reply_idle_seconds", CFG_I32, CFG_OFF(reply_idle_seconds), 0 },
+    { "syn_guard", CFG_BOOL, CFG_OFF(syn_guard), 0 },
+    { "syn_guard_bits", CFG_I32, CFG_OFF(syn_guard_bits), 0 },
+    { "syn_guard_proven_rate", CFG_U32, CFG_OFF(syn_guard_proven_rate), 0 },
 };
 
 
@@ -97,6 +100,9 @@ vg_config_defaults(struct vg_config *c)
     c->remote_map_size = 262144;
     c->drop_map_size = 65536;
     c->reply_idle_seconds = 120;
+    c->syn_guard = 1;
+    c->syn_guard_bits = 25;
+    c->syn_guard_proven_rate = 20;
     c->allow_ports[0] = 22;
     c->allow_port_count = 1;
     c->auto_local = 1;
@@ -207,6 +213,8 @@ apply_scalar(struct vg_config *c, const struct cfg_scalar *s,
 
         *(uint32_t *) ((char *) c + s->off) = (uint32_t) v;
         return 0;
+    case CFG_BOOL:
+        return sw_conf_bool(val, (int *) ((char *) c + s->off));
     }
 
     return -1;
@@ -311,6 +319,14 @@ vg_config_load(const char *path, struct vg_config *c)
 
     if (c->reply_idle_seconds <= 0) {
         c->reply_idle_seconds = 120;
+    }
+
+    if (c->syn_guard_bits < VG_SYN_BITS_MIN
+        || c->syn_guard_bits > VG_SYN_BITS_MAX)
+    {
+        sw_log_warn("%s: syn_guard_bits %d: not %d to %d", path,
+                    c->syn_guard_bits, VG_SYN_BITS_MIN, VG_SYN_BITS_MAX);
+        return -1;
     }
 
     return 0;

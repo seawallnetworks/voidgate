@@ -11,17 +11,26 @@
  * Both states count those replies in rx_reply_*, whatever the verdict.
  *
  * ACTIVE (cfg.armed == 1), first match wins:
- *   1. whitelist                                → count, PASS
- *   2. reply to a flow the host opened, found
+ *   1. allow_networks                           → count, PASS
+ *   2. a pure SYN, syn_guard = yes (Seawall 0023), never counted against
+ *      its source: to a port not in allow_ports, from or to the drop LPM
+ *      → DROP; then, engaged, a first SYN → DROP; else on to 3
+ *   3. allow_ports, DHCP                        → count, PASS
+ *   4. reply to a flow the host opened, found
  *      in sw_flowd's table (Seawall 0015)       → PASS, source not counted
- *   3. source or destination in drop LPM        → DROP
- *   4. anything else                            → count, PASS
+ *   5. source or destination in drop LPM        → DROP
+ *   6. anything else                            → count, PASS
  *
- * Control plane decides prefixes; this program only enforces them.
+ * The control plane decides policy, what to block and when first-SYN drop
+ * engages; this program carries out the per-packet mechanisms: the drop
+ * LPM, the first-SYN filter.
  *
  * Two entries share vg_judge(): voidgate_xdp, run by libxdp's dispatcher,
  * and voidgate_tc, at TC ingress when another program holds the XDP hook.
- * The loader loads one of them.
+ * Each has a twin, voidgate_xdp_pl and voidgate_tc_pl, that sets the
+ * Bloom filter's bits with a plain write, for a kernel before 5.12, whose
+ * verifier refuses an atomic OR even where it is never run. The loader
+ * loads one of the four.
  */
 #include <linux/bpf.h>
 #include <linux/pkt_cls.h>
@@ -41,6 +50,38 @@
 /* which entry vg_judge() runs in: a constant, so each keeps its own call */
 #define VG_HOOK_XDP  0
 #define VG_HOOK_TC   1
+
+/* what the first-SYN filter found (Seawall proposal 0023 §2) */
+#define VG_SYN_DROP  0      /* a first SYN, remembered */
+#define VG_SYN_RETRANS  1   /* in an older generation */
+#define VG_SYN_UNREADY  2   /* the current slot not cleared: fail-open */
+
+#define VG_ROTL(x, b)  (((x) << (b)) | ((x) >> (64 - (b))))
+
+/* one SipHash round on v0..v3 */
+#define VG_SIPROUND(v0, v1, v2, v3)                                         \
+    do {                                                                    \
+        v0 += v1; v1 = VG_ROTL(v1, 13); v1 ^= v0; v0 = VG_ROTL(v0, 32);     \
+        v2 += v3; v3 = VG_ROTL(v3, 16); v3 ^= v2;                           \
+        v0 += v3; v3 = VG_ROTL(v3, 21); v3 ^= v0;                           \
+        v2 += v1; v1 = VG_ROTL(v1, 17); v1 ^= v2; v2 = VG_ROTL(v2, 32);     \
+    } while (0)
+
+/* SipHash-1-3: one compression round a word */
+#define VG_SIPWORD(v0, v1, v2, v3, m)                                       \
+    do {                                                                    \
+        v3 ^= (m);                                                          \
+        VG_SIPROUND(v0, v1, v2, v3);                                        \
+        v0 ^= (m);                                                          \
+    } while (0)
+
+
+/* Set by userspace before the load: the hash's key, drawn at each start,
+ * and log2 of the blocks in a generation, syn_guard_bits less 9.
+ */
+const volatile __u64 vg_syn_k0 = 0;
+const volatile __u64 vg_syn_k1 = 0;
+const volatile __u32 vg_syn_blocks_log2 = 16;
 
 
 static __always_inline struct vg_metrics *get_metrics(void);
@@ -205,11 +246,233 @@ struct {
 } flows_config SEC(".maps");
 
 
+/* First-SYN drop's Bloom filter (Seawall proposal 0023 §2): VG_SYN_SLOTS
+ * slots of 2^vg_syn_blocks_log2 blocks, sized by userspace before the
+ * load, which zeroes a slot through mmap before its generation begins.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct vg_syn_block);
+    __uint(map_flags, BPF_F_MMAPABLE);
+} syn_bloom SEC(".maps");
+
+
+/* The generation each slot was cleared for: userspace writes, BPF reads. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct vg_syn_marks);
+    __uint(map_flags, BPF_F_MMAPABLE);
+} syn_marks SEC(".maps");
+
+
 /* sw_flowd's ICMP error check on the table, for each entry: global
  * functions, which the verifier walks once, not once a path (sw_flowd.h)
  */
 SF_DEFINE_ICMP_ERR_REPLY(vg_icmp_err_xdp, struct xdp_md, flows)
 SF_DEFINE_ICMP_ERR_REPLY(vg_icmp_err_tc, struct __sk_buff, flows)
+
+
+/*
+ * SipHash-1-3 of a SYN's key, with the key drawn at start (Seawall
+ * proposal 0023 §2). A global function, verified once, not on each path
+ * that calls it.
+ */
+__noinline __u64
+vg_syn_hash(__u64 m0, __u64 m1, __u64 m2, __u64 m3, __u64 m4)
+{
+    __u64 k0 = vg_syn_k0, k1 = vg_syn_k1;
+    __u64 v0 = k0 ^ 0x736f6d6570736575ULL;
+    __u64 v1 = k1 ^ 0x646f72616e646f6dULL;
+    __u64 v2 = k0 ^ 0x6c7967656e657261ULL;
+    __u64 v3 = k1 ^ 0x7465646279746573ULL;
+    __u64 b = 40ULL << 56;
+
+    VG_SIPWORD(v0, v1, v2, v3, m0);
+    VG_SIPWORD(v0, v1, v2, v3, m1);
+    VG_SIPWORD(v0, v1, v2, v3, m2);
+    VG_SIPWORD(v0, v1, v2, v3, m3);
+    VG_SIPWORD(v0, v1, v2, v3, m4);
+    VG_SIPWORD(v0, v1, v2, v3, b);
+
+    v2 ^= 0xff;
+    VG_SIPROUND(v0, v1, v2, v3);
+    VG_SIPROUND(v0, v1, v2, v3);
+    VG_SIPROUND(v0, v1, v2, v3);
+
+    return v0 ^ v1 ^ v2 ^ v3;
+}
+
+
+/* Generation g's slot. The mask, which clang can't drop as redundant
+ * behind the barrier, bounds it for the verifier, which doesn't learn
+ * one from a modulo.
+ */
+static __always_inline __u32
+syn_slot(__u64 g)
+{
+    __u32 slot = (__u32) (g % VG_SYN_SLOTS);
+
+    barrier_var(slot);
+
+    return slot & 7;
+}
+
+
+static __always_inline int
+syn_bit(const struct vg_syn_block *b, __u32 o)
+{
+    return (b->w[(o >> 6) & 7] >> (o & 63)) & 1;
+}
+
+
+/*
+ * Bit o of b set, read first: a set bit isn't written, so a line every
+ * CPU reads isn't made to bounce. With atomic, an atomic OR, which keeps
+ * another CPU's bit set in the same word at once; without, for a kernel
+ * before 5.12, a plain write, which may lose it: a real client's first
+ * retransmission is dropped too, never all of them.
+ */
+static __always_inline void
+syn_set(struct vg_syn_block *b, __u32 o, int atomic)
+{
+    __u64 bit = 1ULL << (o & 63);
+    __u32 w = (o >> 6) & 7;
+
+    if (b->w[w] & bit) {
+        return;
+    }
+
+    /*
+     * The atomic OR as asm: clang emits one only at -mcpu=v3, whose
+     * 32-bit subregisters double what the verifier walks in vg_judge()
+     */
+    if (atomic) {
+        asm volatile("lock *(u64 *)(%0 + 0) |= %1"
+                     :: "r" (&b->w[w]), "r" (bit) : "memory");
+
+    } else {
+        b->w[w] |= bit;
+    }
+}
+
+
+/*
+ * The generational Bloom filter (Seawall proposal 0023 §2) on a SYN's
+ * hash h: its block from the low bits, three bit offsets in it from the
+ * 27 above. Found in one of the VG_SYN_OLDER generations before the
+ * current one, whose slot was cleared for it: a retransmission. Else
+ * written into the current generation: a first SYN, dropped. The current
+ * slot not cleared for this generation: passed unfiltered.
+ */
+static __always_inline int
+syn_filter(__u64 h, int atomic)
+{
+    struct vg_syn_marks *mk;
+    struct vg_syn_block *b;
+    __u64 g, gi;
+    __u32 key = 0, log2 = vg_syn_blocks_log2, blk, idx, slot, o0, o1, o2;
+    int i;
+
+    mk = bpf_map_lookup_elem(&syn_marks, &key);
+
+    if (mk == NULL) {
+        return VG_SYN_UNREADY;
+    }
+
+    g = bpf_ktime_get_ns() / VG_SYN_GEN_NS;
+
+    slot = syn_slot(g);
+
+    if (mk->gen[slot] != g) {
+        return VG_SYN_UNREADY;
+    }
+
+    blk = (__u32) h & ((1U << log2) - 1);
+    h >>= log2;
+    o0 = h & (VG_SYN_BLOCK_BITS - 1);
+    o1 = (h >> VG_SYN_BLOCK_LOG2) & (VG_SYN_BLOCK_BITS - 1);
+    o2 = (h >> (2 * VG_SYN_BLOCK_LOG2)) & (VG_SYN_BLOCK_BITS - 1);
+
+#pragma unroll
+    for (i = 1; i <= VG_SYN_OLDER; i++) {
+        gi = g - i;
+        idx = syn_slot(gi);
+
+        /* stale: cleared for another generation, or never */
+        if (mk->gen[idx] != gi) {
+            continue;
+        }
+
+        idx = idx << log2 | blk;
+        b = bpf_map_lookup_elem(&syn_bloom, &idx);
+
+        if (b != NULL && syn_bit(b, o0) && syn_bit(b, o1)
+            && syn_bit(b, o2))
+        {
+            return VG_SYN_RETRANS;
+        }
+    }
+
+    idx = slot << log2 | blk;
+    b = bpf_map_lookup_elem(&syn_bloom, &idx);
+
+    if (b == NULL) {
+        return VG_SYN_UNREADY;
+    }
+
+    syn_set(b, o0, atomic);
+    syn_set(b, o1, atomic);
+    syn_set(b, o2, atomic);
+
+    return VG_SYN_DROP;
+}
+
+
+/* syn_filter() once for each variant, global: verified once, and the
+ * plain one, all a kernel before 5.12 loads, has no atomic OR.
+ */
+__noinline int
+vg_syn_filter(__u64 h)
+{
+    return syn_filter(h, 1);
+}
+
+
+__noinline int
+vg_syn_filter_pl(__u64 h)
+{
+    return syn_filter(h, 0);
+}
+
+
+/* An engaged first-SYN drop's verdict on a SYN of key hash h: VG_DROP
+ * for a first SYN; otherwise the SYN goes on through the checks after it,
+ * the drop LPM's included (Seawall proposal 0023 §1).
+ */
+static __always_inline int
+syn_judge(struct vg_metrics *m, __u64 pkts, __u64 h, int atomic)
+{
+    int rc = atomic ? vg_syn_filter(h) : vg_syn_filter_pl(h);
+
+    if (rc == VG_SYN_DROP) {
+        m->syn_guard_dropped += pkts;
+
+        return VG_DROP;
+    }
+
+    if (rc == VG_SYN_RETRANS) {
+        m->syn_guard_retrans += pkts;
+
+    } else {
+        m->syn_guard_unready += pkts;
+    }
+
+    return VG_PASS;
+}
 
 
 static __always_inline struct vg_metrics *
@@ -469,13 +732,15 @@ is_reply(const struct vg_cfg *c, int rc, const struct pkt_meta *pm,
  */
 static __always_inline int
 vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
-    __u64 pkts, __u64 pkt_len, void *ctx, int hook)
+    __u64 pkts, __u64 pkt_len, void *ctx, int hook, int atomic)
 {
     struct pkt_meta pm;
     __u16 sport, dport;
     __u8 icmp6_type;
-    int rc, local, reply;
+    __u64 ports_seq;
+    int rc, local, reply, syn;
 
+    syn = 0;
     rc = pkt_parse(data, data_end, &pm);
 
     if (rc == PKT_NOT_IP) {
@@ -506,6 +771,10 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
         }
     }
 
+    /* the key's ports and sequence number, as in the packet */
+    ports_seq = (__u64) pm.sport << 48 | (__u64) pm.dport << 32
+                | pm.tcp_seq;
+
     if (pm.family == PKT_V4) {
         __be32 saddr, daddr;
 
@@ -522,6 +791,37 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         if (v4_in_lpm(&allow_v4, saddr) || v4_in_lpm(&allow_v4, daddr)) {
             goto v4_count;
+        }
+
+        /* a pure SYN: libpkt leaves tcp_flags 0 short of PKT_OK; never a
+         * reply, which sw_flowd finds only with ACK or RST
+         */
+        syn = c->syn_guard && local
+              && pm.l4_proto == IPPROTO_TCP
+              && (pm.tcp_flags & (PKT_TCP_SYN | PKT_TCP_ACK)) == PKT_TCP_SYN;
+
+        if (syn) {
+            /* a blocked source never reaches the filter, nor counts to
+             * engage it; to allow_ports, it goes through the filter first
+             */
+            if (!port_allowed(c, dport)
+                && (v4_in_lpm(&drop_v4, saddr) || v4_in_lpm(&drop_v4, daddr)))
+            {
+                m->dropped += pkts;
+
+                return VG_DROP;
+            }
+
+            m->syn_unproven += pkts;
+
+            if (c->syn_engaged
+                && syn_judge(m, pkts,
+                             vg_syn_hash((__u64) saddr << 32 | daddr,
+                                         ports_seq, 0, 0, 0),
+                             atomic) == VG_DROP)
+            {
+                return VG_DROP;
+            }
         }
 
         if (pm.l4_proto == IPPROTO_TCP
@@ -556,7 +856,12 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         if (local) {
             host_count_in(VG_HASH_GET(host_v4, &daddr, m), pkts, pkt_len);
-            host_count_in(VG_HASH_GET(remote_v4, &saddr, m), pkts, pkt_len);
+
+            /* a pure SYN isn't the source's to answer for (0023 §5) */
+            if (!syn) {
+                host_count_in(VG_HASH_GET(remote_v4, &saddr, m), pkts,
+                              pkt_len);
+            }
         }
 
         goto pass;
@@ -603,6 +908,37 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
             goto v6_count;
         }
 
+        syn = c->syn_guard && local
+              && pm.l4_proto == IPPROTO_TCP
+              && (pm.tcp_flags & (PKT_TCP_SYN | PKT_TCP_ACK)) == PKT_TCP_SYN;
+
+        if (syn) {
+            __u64 a[4];
+
+            if (!port_allowed(c, dport)
+                && (v6_in_lpm(&drop_v6, saddr.addr)
+                    || v6_in_lpm(&drop_v6, daddr.addr)))
+            {
+                m->dropped += pkts;
+
+                return VG_DROP;
+            }
+
+            m->syn_unproven += pkts;
+
+            if (c->syn_engaged) {
+                __builtin_memcpy(a, saddr.addr, 16);
+                __builtin_memcpy(&a[2], daddr.addr, 16);
+
+                if (syn_judge(m, pkts,
+                              vg_syn_hash(a[0], a[1], a[2], a[3], ports_seq),
+                              atomic) == VG_DROP)
+                {
+                    return VG_DROP;
+                }
+            }
+        }
+
         if (pm.l4_proto == IPPROTO_TCP
             && v6_tcp_allowed(c, saddr.addr, daddr.addr, sport, dport))
         {
@@ -636,7 +972,11 @@ vg_judge(void *data, void *data_end, struct vg_cfg *c, struct vg_metrics *m,
 
         if (local) {
             host_count_in(VG_HASH_GET(host_v6, &daddr, m), pkts, pkt_len);
-            host_count_in(VG_HASH_GET(remote_v6, &saddr, m), pkts, pkt_len);
+
+            if (!syn) {
+                host_count_in(VG_HASH_GET(remote_v6, &saddr, m), pkts,
+                              pkt_len);
+            }
         }
 
         goto pass;
@@ -718,9 +1058,13 @@ struct {
     __uint(XDP_PASS, 1);
 } XDP_RUN_CONFIG(voidgate_xdp);
 
-SEC("xdp.frags")
-int
-voidgate_xdp(struct xdp_md *ctx)
+struct {
+    __uint(priority, 10);
+    __uint(XDP_PASS, 1);
+} XDP_RUN_CONFIG(voidgate_xdp_pl);
+
+static __always_inline int
+xdp_entry(struct xdp_md *ctx, int atomic)
 {
     void *data = (void *) (long) ctx->data;
     void *data_end = (void *) (long) ctx->data_end;
@@ -755,7 +1099,7 @@ voidgate_xdp(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    if (vg_judge(data, data_end, c, m, 1, pkt_len, ctx, VG_HOOK_XDP)
+    if (vg_judge(data, data_end, c, m, 1, pkt_len, ctx, VG_HOOK_XDP, atomic)
         == VG_DROP)
     {
         return XDP_DROP;
@@ -765,13 +1109,29 @@ voidgate_xdp(struct xdp_md *ctx)
 }
 
 
+SEC("xdp.frags")
+int
+voidgate_xdp(struct xdp_md *ctx)
+{
+    return xdp_entry(ctx, 1);
+}
+
+
+/* before 5.12: no atomic OR */
+SEC("xdp.frags")
+int
+voidgate_xdp_pl(struct xdp_md *ctx)
+{
+    return xdp_entry(ctx, 0);
+}
+
+
 /* Pass is TC_ACT_UNSPEC, which is tcx's TCX_NEXT: classic TC and tcx both
  * go on to the next program, mini-fw's. A GRO'd skb counts as its
  * segments, as XDP saw them.
  */
-SEC("tc")
-int
-voidgate_tc(struct __sk_buff *ctx)
+static __always_inline int
+tc_entry(struct __sk_buff *ctx, int atomic)
 {
     struct vg_metrics *m = get_metrics();
     struct vg_cfg *c;
@@ -820,13 +1180,30 @@ voidgate_tc(struct __sk_buff *ctx)
         return TC_ACT_UNSPEC;
     }
 
-    if (vg_judge(data, data_end, c, m, pkts, ctx->len, ctx, VG_HOOK_TC)
-        == VG_DROP)
+    if (vg_judge(data, data_end, c, m, pkts, ctx->len, ctx, VG_HOOK_TC,
+                 atomic) == VG_DROP)
     {
         return TC_ACT_SHOT;
     }
 
     return TC_ACT_UNSPEC;
+}
+
+
+SEC("tc")
+int
+voidgate_tc(struct __sk_buff *ctx)
+{
+    return tc_entry(ctx, 1);
+}
+
+
+/* before 5.12: no atomic OR */
+SEC("tc")
+int
+voidgate_tc_pl(struct __sk_buff *ctx)
+{
+    return tc_entry(ctx, 0);
 }
 
 

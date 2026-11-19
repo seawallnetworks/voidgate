@@ -485,7 +485,12 @@ main(int argc, char **argv)
         sw_log_fatal("failed to populate allow/local maps");
     }
 
-    if (vg_cfg_commit(&maps, 0, &cfg) < 0) {
+    /* without it, SYNs are counted as with syn_guard = no */
+    if (vg_syn_open(&maps, &cfg) < 0) {
+        sw_log_warn("syn_guard: off, first-SYN drop unavailable");
+    }
+
+    if (vg_cfg_commit(&maps, 0, 0, &cfg) < 0) {
         vg_maps_close(&maps);
         sw_log_fatal("failed to commit cfg map");
     }

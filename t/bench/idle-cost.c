@@ -172,6 +172,8 @@ main(void)
     /* the table's size as sw_flowd's default, not voidgate's placeholder */
     bpf_map__set_max_entries(s->maps.flows, 262144);
     bpf_program__set_autoload(s->progs.voidgate_tc, false);
+    bpf_program__set_autoload(s->progs.voidgate_xdp_pl, false);
+    bpf_program__set_autoload(s->progs.voidgate_tc_pl, false);
 
     if (voidgate_bpf__load(s) != 0) {
         fprintf(stderr, "load: %s\n", strerror(errno));

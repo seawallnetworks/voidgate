@@ -31,6 +31,10 @@ struct vg_config {
     uint32_t          remote_map_size;
     uint32_t          drop_map_size;
     int               reply_idle_seconds;
+    int               syn_guard;          /* first-SYN drop may be used */
+    int               syn_guard_bits;     /* log2 of a generation's bits */
+    uint32_t          syn_guard_proven_rate;  /* a proven address' SYNs a
+                                                 second, unchecked */
     uint16_t          allow_ports[VG_MAX_ALLOW_PORTS];
     int               allow_port_count;
     struct vg_cidr    local_cidr[VG_MAX_CIDR_LIST];

@@ -65,14 +65,27 @@ All files share one daemon, configured by [`conf/xdp.conf`](conf/xdp.conf):
 | `wake_*`, `threshold_*` | 1e9 | never auto-arms, policy never adds blocks |
 | `clear_seconds` | 86400 | an armed block is never auto-disarmed |
 
+First-SYN drop's suite, `t/syn/*.t`, runs with `VG_FIXTURE=syn` and
+[`conf/syn.conf`](conf/syn.conf), the same but for:
+
+| Setting | Value | Why |
+|---|---|---|
+| `wake_pps` | 50 | a burst of SYNs on one tick engages first-SYN drop (`--- engage`); the suite's frames, one at a time, never do |
+| `idle_poll_ms` | 100 | engaged within a tick of the burst |
+| `threshold_pps` | 3 | a source counted against itself is blocked: pure SYNs aren't |
+| `syn_guard_bits` | 23 | the smallest filter, 6 MB |
+
+`VG_SYN_ATOMIC=0` takes the entries without atomic OR, as on a kernel
+before 5.12.
+
 Blocks start from this state and add blocks themselves. Conventional
 addresses used below: `203.0.113.1` and `2001:db8::bad` are the attacker,
 `198.51.100.8` and `2001:db8::1` are innocent neighbors.
 
 ## Layout
 
-Everything test-related lives under `t/`. `prove -r t/` only picks up
-`*.t`, so the subdirectories never run by accident.
+Everything test-related lives under `t/`. `t/bin/run` runs `t/*.t`, or
+`t/syn/*.t` with `VG_FIXTURE=syn`: each suite with its own fixture.
 
 | Path | Contents |
 |---|---|
@@ -82,26 +95,33 @@ Everything test-related lives under `t/`. `prove -r t/` only picks up
 | &nbsp;&nbsp;`v6.t` | IPv6 drop, NDP, SSH and DHCPv6 exemptions |
 | &nbsp;&nbsp;`v6-ext.t` | IPv6 extension-header chains, fragments, truncation |
 | &nbsp;&nbsp;`cidr.t` | CIDR parsing/masking and the local/allow guard, via `block` |
+| `syn/filter.t` | first-SYN drop: the filter's verdicts and retransmission window, the drop LPM ahead of it, pure SYNs never counted against their source |
 | `lib/VG/Test.pm` | Test::Base subclass: `run_xdp_blocks`, `run_ctl_blocks` |
 | `lib/VG/Packet.pm` | frame builder and raw-socket sender |
-| `lib/VG/Ctl.pm` | control socket client (`ctl`, `stats`) |
+| `lib/VG/Ctl.pm` | control socket client (`ctl`, `stats`, `status`) |
 | `bin/run` | runs the `*.t` suite against a real daemon |
 | `bin/create_env.sh` | private namespaces + `test0`/`peer0` veth; sourced by `bin/run` and `integration/*.sh` |
 | `bin/reindex` | renumbers `=== TEST N:` blocks, normalizes spacing |
 | `conf/xdp.conf` | daemon fixture for the `*.t` suite |
+| `conf/syn.conf` | daemon fixture for `syn/*.t` |
 | `conf/idle.conf` | never-wake fixture for `integration/daemon.sh` and `resty.sh` |
 | `unit/policy.c` | control-plane unit test, built as `t/unit/policy` by `make` (no root) |
 | `unit/cidr.c` | CIDR parser and config CIDR lists, built as `t/unit/cidr` (no root) |
+| `unit/syn-plain.sh` | the entries for a kernel before 5.12 have no atomic OR, nor call one that has: read from the object, no 5.10 kernel needed (no root) |
 | `integration/daemon.sh` | daemon startup, detach, logging, pid file |
 | `integration/resty.sh` | OpenResty client in real nginx (`resty.lua` methods, `ban()`, `-g`); skips without nginx + lua module |
 | `integration/netns.sh` | veth flood: IDLE → ACTIVE wake and drop (`VG_HOOK=tc`: at TC) |
 | `integration/reply.sh` | with sw_flowd: its table bound when voidgate starts after it (not before), kept across a restart of sw_flowd; a download survives an armed gate, a flood from its server is blocked, manual blocks win; a table of another layout is refused (`VG_HOOK=tc`: at TC); skips without sw_flowd (`SW_FLOWD`, or `../sw_flowd/sw_flowd`) |
+| `integration/syn.sh` | first-SYN drop under floods: a UDP flood leaves it in standby, a SYN flood engages it and it stays so, standby after `clear_seconds`, fail-open with userspace stopped, `syn_guard = no` (`VG_HOOK=tc`, `VG_SYN_ATOMIC=0`) |
 | `integration/coexist.sh` | sharing the XDP hook: libxdp's dispatcher, TC when another program holds it, leftovers of a killed daemon; skips without clang + xdp-tools |
 | `bench/` | manual load generators (`hping3`, `pktgen`) from a netns; not tests |
+| `bench/syn-bits.c` | no bit of the filter lost when every CPU writes one cache line at once, by `BPF_PROG_TEST_RUN`; `-p`, the plain writes, shows the race is real. Run by `make test` |
 | `bench/idle-cost.c` | ns a frame of the XDP program, idle and armed, with and without sw_flowd's table, by `BPF_PROG_TEST_RUN`: `make t/bench/idle-cost && sudo t/bench/idle-cost` |
 
-`make test` runs `t/unit/policy` and `t/unit/cidr`, then `sudo t/bin/run` three times:
-at XDP, at tcx (`VG_HOOK=tc`) and at classic TC (`VG_HOOK=tc SW_NO_TCX=1`). The integration
+`make test` runs `t/unit/policy`, `t/unit/cidr` and `t/unit/syn-plain.sh`,
+then `sudo t/bin/run` three times: at XDP, at tcx (`VG_HOOK=tc`) and at
+classic TC (`VG_HOOK=tc SW_NO_TCX=1`); first-SYN drop's suite at XDP, at XDP
+without atomic OR, and at tcx; and `t/bench/syn-bits`. The integration
 scripts run separately, each with sudo:
 
 ```sh
@@ -110,6 +130,7 @@ sudo t/integration/resty.sh
 sudo t/integration/netns.sh
 sudo t/integration/reply.sh
 sudo t/integration/coexist.sh
+sudo t/integration/syn.sh
 ```
 
 ## Writing XDP blocks
@@ -140,9 +161,22 @@ __DATA__
 | `--- setup` | no | control commands, one per line, each must reply `ok` (e.g. `block <cidr>`, `unblock <cidr>`) |
 | `--- idle` | no | leave the gate disarmed (`armed = 0`) |
 | `--- counters` | no | expected counter deltas summed over the block's packets, e.g. `rx_pkts=1 dropped=0`; only the listed keys are checked |
+| `--- engage` | no | engage first-SYN drop first, with a burst of spoofed SYNs from `203.0.113.1`-`20` to port 9 (`conf/syn.conf`) |
+| `--- blocks` | no | the cidrs blocked after the packets, in any order; empty: none |
 
 Counter names are the ones from `voidgatectl stats`: `rx_pkts`,
-`rx_bytes`, `passed`, `dropped`, `non_ip`, `map_full`, `parse_err`.
+`rx_bytes`, `passed`, `dropped`, `non_ip`, `map_full`, `parse_err`,
+`syn_unproven`, `syn_guard_dropped`, `syn_guard_retrans`,
+`syn_guard_unready`. A frame first-SYN drop drops is an `XDP_DROP`, as
+one the drop LPM drops.
+
+A packets line can also be:
+
+| Line | Meaning |
+|---|---|
+| `sleep S` | wait `S` seconds; no verdict. The harness waits at least 20 ms after each frame, so a gap wanted is `S` plus about 30 ms |
+| `ctl CMD` | a control command, which must reply `ok`; no verdict |
+| `Nx SPEC` | `N` frames back to back; one verdict, `XDP_DROP` if all were dropped, `XDP_PASS` if none, else `D of N dropped` |
 
 Single-line sections can use the `--- name: value` form. Longer values go
 on the lines after `--- name`:
@@ -179,7 +213,7 @@ name and the reply, because that is a fixture bug, not a verdict.
 
 | Part | Values |
 |---|---|
-| proto | `tcp` (SYN), `udp`, `icmpv6`; IPv4 also `frag` (header only, no L4) |
+| proto | `tcp` (a SYN, unless `flags=`), `udp`, `icmpv6`; IPv4 also `frag` (header only, no L4) |
 | endpoints | IPv4 `203.0.113.1:68`; IPv6 `[2001:db8::bad]:547`; bare address when there is no port (`frag`, `icmpv6`) |
 
 | Option | Meaning |
@@ -189,6 +223,8 @@ name and the reply, because that is a fixture bug, not a verdict.
 | `ext=a,b,...` | IPv6 extension headers in **wire order**: `hopopts`, `dstopts`, `routing`, `ah`, `frag`. `frag:N` sets the raw fragment offset field (`frag:8` is non-first). `name*N` repeats a header |
 | `type=N` | ICMPv6 type (`135` is Neighbor Solicitation) |
 | `hop=N` | IPv6 hop limit (default 64) |
+| `seq=N` | TCP sequence number (default 0) |
+| `flags=XY` | TCP flags as letters of `FSRPAU` (default `S`), e.g. `flags=SA` |
 | `set@I=V` | after building, set frame byte `I` (0-based, Ethernet header included) to `V`, e.g. to corrupt a length field |
 
 Examples:

@@ -2,9 +2,12 @@
 # Source from a test script. Re-execs the caller in private namespaces.
 
 if [[ ${1:-} != --isolated ]]; then
-    # sudo resets the environment: keep what picks the hook
+    # sudo resets the environment: keep what picks the hook, the fixture
+    # and the entries
     exec sudo env ${VG_HOOK:+VG_HOOK=$VG_HOOK} ${SW_NO_TCX:+SW_NO_TCX=1} \
         ${SW_FLOWD:+SW_FLOWD=$SW_FLOWD} \
+        ${VG_FIXTURE:+VG_FIXTURE=$VG_FIXTURE} \
+        ${VG_SYN_ATOMIC:+VG_SYN_ATOMIC=$VG_SYN_ATOMIC} \
         unshare --mount-proc --net --pid --fork --kill-child \
         --propagation private bash "$0" --isolated \
         "$(readlink /proc/self/ns/mnt)" "$@"

@@ -3,6 +3,8 @@
 # Run the Perl Test::Base suite (t/*.t) against a real daemon in private
 # namespaces. Extra arguments go to prove, e.g. -v t/v4.t. VG_HOOK=tc
 # judges at TC ingress instead of XDP (SW_NO_TCX=1, the stack's switch: classic TC).
+# VG_FIXTURE=syn runs t/syn/*.t, first-SYN drop's, with t/conf/syn.conf;
+# VG_SYN_ATOMIC=0 there takes the entries without atomic OR.
 # Usage: sudo t/bin/run [prove args]
 set -euo pipefail
 
@@ -24,7 +26,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cp "$root/t/conf/xdp.conf" "$conf"
+case ${VG_FIXTURE:-xdp} in
+xdp) fixture=xdp.conf; tests=(t/*.t) ;;
+syn) fixture=syn.conf; tests=(t/syn/) ;;
+*) echo "VG_FIXTURE: xdp or syn" >&2; exit 2 ;;
+esac
+
+cp "$root/t/conf/$fixture" "$conf"
 printf 'log_file = %s\n' "$work/daemon.log" >> "$conf"
 printf 'pid_file = %s\n' "$work/voidgate.pid" >> "$conf"
 printf 'hook = %s\n' "${VG_HOOK:-xdp}" >> "$conf"
@@ -37,7 +45,12 @@ timeout --kill-after=2 10 "$root/voidgate" -d -c "$conf"
 grep -o 'attached [a-z-]* on .*' "$work/daemon.log"
 
 cd "$root"
-if (( $# == 0 )); then
-    set -- -r t/
+# the fixture's files, unless the arguments name some
+files=0
+for a in "$@"; do
+    [[ $a == -* ]] || files=1
+done
+if (( files == 0 )); then
+    set -- "$@" "${tests[@]}"
 fi
 VG_PEER=peer0 prove -I t/lib "$@"
